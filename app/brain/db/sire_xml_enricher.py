@@ -33,7 +33,7 @@ def enrich_preliminary_data(limit: int = 500):
         
     records = response.data
     if not records:
-        print("✅ No hay XMLs pendientes por enriquecer.")
+        print("No hay XMLs pendientes por enriquecer.")
         return
         
     to_enrich = []
@@ -50,7 +50,7 @@ def enrich_preliminary_data(limit: int = 500):
             to_enrich.append(r)
             
     if not to_enrich:
-        print("✅ Todos los XMLs descargados ya fueron enriquecidos.")
+        print("Todos los XMLs descargados ya fueron enriquecidos.")
         return
         
     print(f"Encontrados {len(to_enrich)} comprobantes listos para extraer data.")
@@ -64,7 +64,7 @@ def enrich_preliminary_data(limit: int = 500):
         table_name = "sire_preliminar_compras" if is_compra else "sire_preliminar_ventas"
         
         if not xml_path.exists():
-            print(f"⚠️ Archivo XML no encontrado en disco: {ruta_xml}")
+            print(f"Advertencia: Archivo XML no encontrado en disco: {ruta_xml}")
             # Mark as ERROR in enrichment so we don't infinitely retry unless reset
             supabase.table(table_name) \
                 .update({"estado_enriquecimiento": "ERROR"}) \
@@ -89,18 +89,18 @@ def enrich_preliminary_data(limit: int = 500):
                     .eq("id", preliminar_id) \
                     .execute()
                     
-                print(f"✅ Enriquecido {xml_path.name}: {desc_text[:50]}...")
+                print(f"Enriquecido {xml_path.name}: {desc_text[:50]}...")
             else:
-                print(f"⚠️ No se pudo extraer info de {xml_path.name}")
+                print(f"Advertencia: No se pudo extraer info de {xml_path.name}")
                 supabase.table(table_name) \
                     .update({"estado_enriquecimiento": "ERROR"}) \
                     .eq("id", preliminar_id) \
                     .execute()
                     
         except Exception as e:
-            print(f"❌ Error al procesar {ruta_xml}: {e}")
+            print(f"Error al procesar {ruta_xml}: {e}")
             
-    print("✅ Proceso de enriquecimiento finalizado.")
+    print("Proceso de enriquecimiento finalizado.")
 
 if __name__ == "__main__":
     import argparse

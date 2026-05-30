@@ -25,12 +25,12 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
     # Since foreign keys exist, Supabase API allows nested selects.
     response = supabase.table("sire_comprobantes_fisicos") \
         .select(
-            "id, cliente_id, periodo, tipo_libro, ruc_tercero, tipo_cp, serie, numero, intentos_descarga, "
+            "id, cliente_id, periodo, tipo_libro, ruc_tercero, tipo_cp, serie, numero, reintentos, "
             "sire_preliminar_compras(fecha_emision, total_cp, car_sunat), "
             "sire_preliminar_ventas(fecha_emision, total_cp, car_sunat)"
         ) \
         .eq("estado_xml", "PENDIENTE") \
-        .lt("intentos_descarga", 3) \
+        .lt("reintentos", 3) \
         .limit(limit) \
         .execute()
         
@@ -84,7 +84,7 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
         
         # Increment intentos
         supabase.table("sire_comprobantes_fisicos") \
-            .update({"intentos_descarga": r["intentos_descarga"] + 1}) \
+            .update({"reintentos": r["reintentos"] + 1}) \
             .eq("id", r["id"]) \
             .execute()
             
@@ -118,20 +118,28 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                 update_data["ruta_xml"] = ruta
             elif status == "skipped":
                 update_data["estado_xml"] = "DESCARGADO"
+                # Find the existing file path
+                base_name = f"{res['ruc_emisor']}-{res['tipo']}-{res['serie']}-{res['numero']}"
+                out_path = Path(root) / outdir / res['period'] / res['book'] / base_name
+                for ext in (".zip", ".xml", ".XML"):
+                    if out_path.with_suffix(ext).exists():
+                        update_data["ruta_xml"] = str(out_path.with_suffix(ext))
+                        break
             elif status == "not_found":
-                update_data["estado_xml"] = "NO_ENCONTRADO"
+                update_data["estado_xml"] = "NO_EXISTE"
             else:
                 update_data["estado_xml"] = "ERROR"
+                update_data["error_log"] = res.get("error", "Error desconocido")
                 
             supabase.table("sire_comprobantes_fisicos") \
                 .update(update_data) \
                 .eq("id", db_record["id"]) \
                 .execute()
                 
-        print("✅ Base de datos de comprobantes físicos actualizada.")
+        print("Base de datos de comprobantes físicos actualizada.")
         
     except Exception as e:
-        print(f"❌ Error catastrófico en la orquestación: {e}")
+        print(f"Error catastrófico en la orquestación: {e}")
 
 if __name__ == "__main__":
     import argparse

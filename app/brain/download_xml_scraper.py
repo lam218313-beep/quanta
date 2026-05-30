@@ -78,7 +78,7 @@ async def _dismiss_overlays(page):
     for sel in ("#divModalCampana", "#divModalCampanaBak"):
         try:
             if await page.locator(sel).is_visible(timeout=500):
-                print(f"   ⚠️ Overlay detected: {sel}. Removing…")
+                print(f"   Overlay detected: {sel}. Removing…")
                 await page.evaluate(
                     f"document.querySelector('{sel}') && document.querySelector('{sel}').remove()"
                 )
@@ -93,7 +93,7 @@ async def _navigate_to_consulta_cpe(page):
     Uses the JavaScript function ``ejecuta()`` with menu code 11.38.1.1.1
     to open "Nueva Consulta de comprobantes de pago" inside #iframeApplication.
     """
-    print("⏳ Navigating to Consulta de Comprobantes de Pago…")
+    print("Navigating to Consulta de Comprobantes de Pago…")
     await page.wait_for_load_state("networkidle")
     await _dismiss_overlays(page)
 
@@ -102,7 +102,7 @@ async def _navigate_to_consulta_cpe(page):
     try:
         await page.evaluate("$('#nivel4_11_38_1_1_1').click()")
     except Exception as e:
-        print(f"   ⚠️ JS click() raised: {e}")
+        print(f"   JS click() raised: {e}")
 
     await asyncio.sleep(4)
 
@@ -146,7 +146,7 @@ async def _setup_filters_and_search(frame, *, ruc: str, fecha_desde: str, fecha_
     ruc : The RUC to search (emisor or receptor depending on context)
     fecha_desde, fecha_hasta : dd/mm/yyyy date range
     """
-    print(f"   📅 Filtering: {fecha_desde} – {fecha_hasta} | RUC: {ruc}")
+    print(f"   Filtering: {fecha_desde} – {fecha_hasta} | RUC: {ruc}")
 
     # The "Nueva Consulta" page has various filter fields.
     # Try to fill them, but some might not exist depending on the SUNAT version.
@@ -228,7 +228,7 @@ async def _search_individual(
     Consulta de Comprobantes page.
     """
     base_name = f"{query.ruc_emisor}-{query.tipo}-{query.serie}-{query.numero}"
-    print(f"📝 Query: {base_name}")
+    print(f"Query: {base_name}")
 
     # Check if we are in the new Angular form by looking for 'rucEmisor' formcontrolname
     is_angular = await frame.locator("input[formcontrolname='rucEmisor']").count() > 0
@@ -246,7 +246,7 @@ async def _search_individual(
         try:
             await frame.locator("input[formcontrolname='rucEmisor']").fill(query.ruc_emisor)
         except Exception as e:
-            print(f"   ⚠️ Could not fill rucEmisor: {e}")
+            print(f"   Could not fill rucEmisor: {e}")
 
         # 3. Tipo Comprobante (PrimeNG dropdown)
         try:
@@ -270,18 +270,18 @@ async def _search_individual(
             if await item_loc.count() > 0:
                 await item_loc.first.click()
             else:
-                print(f"   ⚠️ Could not find dropdown option for {query.tipo}")
+                print(f"   Could not find dropdown option for {query.tipo}")
                 # Click outside to close dropdown
                 await frame.evaluate("document.body.click()")
         except Exception as e:
-            print(f"   ⚠️ Could not select tipoComprobante: {e}")
+            print(f"   Could not select tipoComprobante: {e}")
 
         # 4. Serie & Numero
         try:
             await frame.locator("input[formcontrolname='serieComprobante']").fill(query.serie)
             await frame.locator("input[formcontrolname='numeroComprobante']").fill(query.numero)
         except Exception as e:
-            print(f"   ⚠️ Could not fill serie/numero: {e}")
+            print(f"   Could not fill serie/numero: {e}")
             
     else:
         # Legacy form filling
@@ -305,7 +305,7 @@ async def _search_individual(
                         await loc.first.fill(value)
                     await asyncio.sleep(0.2)
             except Exception as e:
-                print(f"   ⚠️ Could not fill {name}: {e}")
+                print(f"   Could not fill {name}: {e}")
 
     # Click the Consultar button
     for sel in [
@@ -356,7 +356,7 @@ async def _search_individual(
                 pass
         return None
 
-    print(f"   ✅ Found: {base_name}")
+    print(f"   Found: {base_name}")
     
     # Dump result modal HTML for debugging
     if debug_dir:
@@ -419,7 +419,7 @@ async def _search_individual(
                 continue
 
     if not targets:
-        print(f"   ⚠️ Comprobante found but NO download button available")
+        print(f"   Comprobante found but NO download button available")
         # Save the result as a "validation only" record
         if debug_dir:
             debug_dir.mkdir(parents=True, exist_ok=True)
@@ -474,7 +474,7 @@ async def _search_individual(
             await asyncio.sleep(1)
             
         except Exception as e:
-            print(f"   ❌ Download failed for {file_type}: {e}")
+            print(f"   Download failed for {file_type}: {e}")
             
     # Close modal for next query
     try:
@@ -555,7 +555,7 @@ async def run_batch(
         await context.add_cookies(cookies)
 
         page = await context.new_page()
-        print("🚀 Navigating to SUNAT Main Menu…")
+        print("Navigating to SUNAT Main Menu…")
         await page.goto(MENU_URL)
         await _dismiss_overlays(page)
 
@@ -568,7 +568,7 @@ async def run_batch(
             debug_path = out_base / "_debug_consulta_form.html"
             debug_path.parent.mkdir(parents=True, exist_ok=True)
             debug_path.write_text(debug_html, encoding="utf-8")
-            print(f"   📄 Debug form HTML saved to: {debug_path}")
+            print(f"   Debug form HTML saved to: {debug_path}")
         except Exception:
             pass
 
@@ -578,7 +578,7 @@ async def run_batch(
                 "Array.from(document.querySelectorAll('input,select,button,a[href]')).map("
                 "e=>({tag:e.tagName,name:e.name||'',id:e.id||'',type:e.type||'',text:(e.innerText||e.value||'').trim().substring(0,60)}))"
             )
-            print(f"   🔎 Form has {len(fields)} interactive elements")
+            print(f"   Form has {len(fields)} interactive elements")
             for f in fields[:30]:
                 print(f"      {f}")
         except Exception:
@@ -599,7 +599,7 @@ async def run_batch(
             # Check if frame detached or reloaded
             try:
                 if frame.is_detached():
-                    print("   ⚠️ Frame detached, re-navigating to menu...")
+                    print("   Frame detached, re-navigating to menu...")
                     page, frame = await _navigate_to_consulta_cpe(page)
             except Exception:
                 pass
@@ -622,17 +622,17 @@ async def run_batch(
 
                 if saved:
                     results.append(_result_dict(q, "ok", path=str(saved)))
-                    print(f"🎉 Saved: {saved}")
+                    print(f"Saved: {saved}")
                 else:
                     results.append(_result_dict(q, "not_found"))
-                    print(f"⚠️ Not found / no download: {base_name}")
+                    print(f"Not found / no download: {base_name}")
 
                 # Clear the form for the next query
                 await _clear_form(frame, page=page)
 
             except Exception as e:
                 results.append(_result_dict(q, "error", error=str(e)))
-                print(f"❌ Error: {e}")
+                print(f"Error: {e}")
                 # Try to recover by clearing form
                 try:
                     await _clear_form(frame, page=page)

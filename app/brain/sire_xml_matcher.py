@@ -34,12 +34,25 @@ _NS = {
 }
 
 
+import zipfile
+
 def _extract_from_xml(xml_path: Path) -> Optional[dict]:
-    """Extract key fields and item descriptions from a UBL XML file."""
+    """Extract key fields and item descriptions from a UBL XML or ZIP file."""
     try:
-        content = xml_path.read_bytes()
-        return _extract_from_xml_string(content)
-    except Exception:
+        if xml_path.suffix.lower() == ".zip":
+            with zipfile.ZipFile(xml_path, "r") as z:
+                for name in z.namelist():
+                    if name.lower().endswith(".xml"):
+                        xml_bytes = z.read(name)
+                        info = _extract_from_xml_string(xml_bytes)
+                        if info:
+                            return info
+            return None
+        else:
+            content = xml_path.read_bytes()
+            return _extract_from_xml_string(content)
+    except Exception as e:
+        print(f"Error parsing {xml_path}: {e}")
         return None
 
 def _extract_from_xml_string(xml_bytes: bytes) -> Optional[dict]:
