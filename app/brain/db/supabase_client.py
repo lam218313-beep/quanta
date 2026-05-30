@@ -3,7 +3,7 @@ Supabase client connection.
 """
 import os
 from supabase import create_client, Client
-from config import get_settings
+from app.brain.config import get_settings
 
 
 def get_supabase_client() -> Client:
@@ -14,7 +14,7 @@ def get_supabase_client() -> Client:
     settings = get_settings()
     return create_client(
         settings.supabase_url,
-        settings.supabase_anon_key
+        settings.supabase_key
     )
 
 

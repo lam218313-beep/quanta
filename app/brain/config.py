@@ -8,7 +8,7 @@ from functools import lru_cache
 class Settings(BaseSettings):
     # Supabase
     supabase_url: str
-    supabase_anon_key: str
+    supabase_key: str
     supabase_db_password: str = ""
     
     # Odoo
@@ -21,8 +21,11 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     
     class Config:
-        env_file = "../.env"
+        import os
+        from pathlib import Path
+        env_file = str(Path(__file__).resolve().parents[1] / ".env")
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 @lru_cache()
