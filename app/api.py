@@ -150,11 +150,13 @@ async def trigger_download_fisicos(req: BotRequest, background_tasks: Background
         return {"status": "already_running", "message": "XML Scraper is already running.", "task_id": task_id}
         
     cmd = [sys.executable, "app/brain/db/sire_bot_orchestrator.py", "--limit", "200", "--ruc", req.ruc]
+    if req.periodo:
+        cmd += ["--periodo", req.periodo]
     root_dir = Path(__file__).parent.parent
     
     running_tasks[task_id] = True
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
-    return {"status": "started", "message": f"Started XML Download bot for {req.ruc}", "task_id": task_id}
+    return {"status": "started", "message": f"Started XML Download bot for {req.ruc} - {req.periodo or 'todos los periodos'}", "task_id": task_id}
 
 @app.post("/api/bot/sync-files")
 async def trigger_sync_files(background_tasks: BackgroundTasks):

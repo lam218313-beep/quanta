@@ -12,7 +12,7 @@ if str(root) not in sys.path:
 from app.brain.db.supabase_client import get_supabase
 from app.brain.download_xml_scraper import CpeQuery, run_batch
 
-async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xml", headless: bool = False, ruc: str = None):
+async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xml", headless: bool = False, ruc: str = None, periodo: str = None):
     """
     Busca comprobantes físicos pendientes en la base de datos, extrae la data preliminar
     requerida (monto, fecha) y orquesta la descarga usando el scraper de Playwright.
@@ -33,6 +33,9 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
         
     if ruc:
         query = query.eq("clientes.ruc", ruc)
+    
+    if periodo:
+        query = query.eq("periodo", periodo)
         
     response = query.limit(limit).execute()
         
@@ -155,6 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--ruc", type=str, help="RUC de la empresa para filtrar")
+    parser.add_argument("--periodo", type=str, help="Periodo a descargar (ej: 202604)")
     args = parser.parse_args()
     
-    asyncio.run(orchestrate_xml_downloads(limit=args.limit, headless=args.headless, ruc=args.ruc))
+    asyncio.run(orchestrate_xml_downloads(limit=args.limit, headless=args.headless, ruc=args.ruc, periodo=args.periodo))
