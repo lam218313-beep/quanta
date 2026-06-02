@@ -20,6 +20,19 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
     supabase = get_supabase()
     
     print(f"Buscando hasta {limit} comprobantes pendientes de descargar XML...")
+    if ruc:
+        print(f"  Filtro RUC: {ruc}")
+    if periodo:
+        print(f"  Filtro Periodo: {periodo}")
+    
+    # Resolve cliente_id from RUC first (more reliable than join filter)
+    cliente_id = None
+    if ruc:
+        r = supabase.table("clientes").select("id").eq("ruc", ruc).execute()
+        if not r.data:
+            print(f"Error: No se encontró cliente con RUC {ruc}")
+            return
+        cliente_id = r.data[0]["id"]
     
     query = supabase.table("sire_comprobantes_fisicos") \
         .select(
@@ -31,8 +44,8 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
         .or_("estado_xml.in.(PENDIENTE,ERROR),estado_pdf.in.(PENDIENTE,ERROR)") \
         .lt("reintentos", 10)
         
-    if ruc:
-        query = query.eq("clientes.ruc", ruc)
+    if cliente_id:
+        query = query.eq("cliente_id", cliente_id)
     
     if periodo:
         query = query.eq("periodo", periodo)
