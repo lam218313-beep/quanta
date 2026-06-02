@@ -481,8 +481,9 @@ async def _search_individual(
             import time
             import shutil
             
+            # AUMENTAMOS EL TIMEOUT A 30 SEGUNDOS (30000ms) PORQUE SUNAT ES LENTO CON LOS ZIP
             download_task = asyncio.ensure_future(
-                page.context.wait_for_event("download", timeout=15000)
+                page.context.wait_for_event("download", timeout=30000)
             )
 
             await target.click()
@@ -498,7 +499,9 @@ async def _search_individual(
             # Active polling loop for Chromium silent downloads
             recovered = False
             start_wait = time.time()
-            while time.time() - start_wait < 15: # 15 seconds max wait
+            
+            # AUMENTAMOS EL BUCLE A 30 SEGUNDOS
+            while time.time() - start_wait < 30: 
                 if download_task.done() and not download_task.cancelled() and not isinstance(download_task.exception(), Exception):
                     break # The official download event fired!
                     
@@ -508,11 +511,24 @@ async def _search_individual(
                         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                         newest = files[0]
                         # Check if it's a recent file, not a temporary crdownload, and has size > 0
-                        if time.time() - newest.stat().st_mtime < 20 and not newest.name.endswith('.crdownload'):
-                            # File is ready!
-                            final_dir = out_dir / (file_type if file_type != "fallback" else "pdf")
+                        if time.time() - newest.stat().st_mtime < 35 and not newest.name.endswith('.crdownload'):
+                            
+                            # SOLUCIÓN: Detectar la extensión real (sea .zip, .xml, o .pdf)
+                            ext_real = newest.suffix.lower()
+                            if not ext_real or ext_real == '.bin':
+                                ext_real = f".{file_type}" if file_type != "fallback" else ".pdf"
+
+                            # Rutear a la carpeta correcta basado en la extensión real
+                            if ext_real in (".xml", ".zip"):
+                                subfolder = "xml"
+                            elif ext_real == ".pdf":
+                                subfolder = "pdf"
+                            else:
+                                subfolder = "pdf" if file_type in ("pdf", "fallback") else "xml"
+                                
+                            final_dir = out_dir / subfolder
                             final_dir.mkdir(parents=True, exist_ok=True)
-                            final_path = final_dir / f"{base_name}.{file_type if file_type != 'fallback' else 'pdf'}"
+                            final_path = final_dir / f"{base_name}{ext_real}"
                             
                             shutil.copy2(newest, final_path)
                             try:
@@ -522,7 +538,7 @@ async def _search_individual(
                                 
                             downloaded_paths.append(final_path)
                             recovered = True
-                            print(f"   Recovered downloaded file actively: {newest.name}")
+                            print(f"   Recovered downloaded file actively: {newest.name} -> guardado como {final_path.name}")
                             
                             # Cancel the official wait task since we got the file
                             if not download_task.done():
@@ -538,18 +554,22 @@ async def _search_individual(
             try:
                 download = await download_task
                 suggested = download.suggested_filename or "download"
+                
+                # SOLUCIÓN: Respetar la extensión del archivo oficial sugerido por SUNAT
                 ext = os.path.splitext(suggested)[1] or f".{file_type}"
                 
                 if ext.lower() == ".bin" and file_type != "fallback":
                     ext = f".{file_type}"
                     
                 ext_lower = ext.lower()
+                
+                # Rutear a la carpeta correcta
                 if ext_lower in (".xml", ".zip"):
                     subfolder = "xml"
                 elif ext_lower == ".pdf":
                     subfolder = "pdf"
                 else:
-                    subfolder = "otros"
+                    subfolder = "pdf" if file_type in ("pdf", "fallback") else "xml"
                     
                 final_dir = out_dir / subfolder
                 final_dir.mkdir(parents=True, exist_ok=True)
@@ -557,9 +577,9 @@ async def _search_individual(
                 final_path = final_dir / f"{base_name}{ext}"
                 await download.save_as(str(final_path))
                 downloaded_paths.append(final_path)
+                print(f"   Downloaded officially: {final_path.name}")
                 await asyncio.sleep(0.5)
             except Exception as wait_err:
-                # If both polling and official download failed
                 print(f"   Download failed for {file_type}: Timeout or error -> {wait_err}")
 
         except Exception as e:
