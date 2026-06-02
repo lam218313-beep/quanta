@@ -10,7 +10,7 @@ if str(root) not in sys.path:
 from app.brain.db.supabase_client import get_supabase
 from app.brain.sire_xml_matcher import _extract_from_xml
 
-def enrich_preliminary_data(limit: int = 500):
+def enrich_preliminary_data(limit: int = 500, ruc: str = None):
     """
     Busca comprobantes físicos que ya tienen su XML descargado (estado_xml = 'DESCARGADO')
     pero que aún no han enriquecido la tabla preliminar. Extrae la glosa y detracción del XML
@@ -20,16 +20,20 @@ def enrich_preliminary_data(limit: int = 500):
     
     print(f"Buscando XMLs descargados para enriquecer (límite {limit})...")
     
-    response = supabase.table("sire_comprobantes_fisicos") \
+    query = supabase.table("sire_comprobantes_fisicos") \
         .select(
             "id, tipo_libro, ruta_xml, preliminar_compra_id, preliminar_venta_id, "
             "sire_preliminar_compras(estado_enriquecimiento), "
-            "sire_preliminar_ventas(estado_enriquecimiento)"
+            "sire_preliminar_ventas(estado_enriquecimiento), "
+            "clientes!inner(ruc)"
         ) \
         .eq("estado_xml", "DESCARGADO") \
-        .not_.is_("ruta_xml", "null") \
-        .limit(limit) \
-        .execute()
+        .not_.is_("ruta_xml", "null")
+        
+    if ruc:
+        query = query.eq("clientes.ruc", ruc)
+        
+    response = query.limit(limit).execute()
         
     records = response.data
     if not records:
@@ -84,7 +88,7 @@ def enrich_preliminary_data(limit: int = 500):
                     .update({
                         "descripcion_comprobante": desc_text if desc_text else "Sin descripción",
                         "estado_enriquecimiento": "COMPLETO",
-                        # We could also update the detraccion column if we want to overwrite SIRE's
+                        "detraccion": detraccion
                     }) \
                     .eq("id", preliminar_id) \
                     .execute()
@@ -106,6 +110,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--ruc", type=str, help="RUC de la empresa para filtrar")
     args = parser.parse_args()
     
-    enrich_preliminary_data(limit=args.limit)
+    enrich_preliminary_data(limit=args.limit, ruc=args.ruc)

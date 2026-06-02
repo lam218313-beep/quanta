@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     class Config:
         import os
         from pathlib import Path
-        env_file = str(Path(__file__).resolve().parents[1] / ".env")
+        env_file = str(Path(__file__).parent.parent / ".env")
         env_file_encoding = "utf-8"
         extra = "ignore"
 

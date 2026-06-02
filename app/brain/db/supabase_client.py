@@ -3,7 +3,10 @@ Supabase client connection.
 """
 import os
 from supabase import create_client, Client
-from app.brain.config import get_settings
+try:
+    from app.brain.config import get_settings
+except ModuleNotFoundError:
+    from brain.config import get_settings
 
 
 def get_supabase_client() -> Client:

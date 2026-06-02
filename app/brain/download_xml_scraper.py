@@ -19,7 +19,7 @@ import sys
 from playwright.async_api import async_playwright
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable, Literal, Optional
+from typing import Iterable, Literal, Optional, List
 
 from dotenv import load_dotenv
 
@@ -45,18 +45,23 @@ class CpeQuery:
     period: str = ""    # YYYYMM for output organization
     book: str = ""      # purchases | sales
     car_sunat: str = ""
+    ruc_cliente: str = "" # Required for multi-tenant sessions
+    razon_social_cliente: str = "" # Required for folder naming
 
 
 # ---------------------------------------------------------------------------
 # Cookie / session helpers
 # ---------------------------------------------------------------------------
 
-def _load_sunat_session_cookies() -> list[dict]:
-    cookie_file = os.path.join(os.path.dirname(__file__), "sunat_session.json")
+def _load_sunat_session_cookies(ruc: str) -> list[dict]:
+    cookie_file = os.path.join(os.path.dirname(__file__), f"sunat_session_{ruc}.json")
     if not os.path.exists(cookie_file):
-        raise FileNotFoundError(
-            "Session file not found. Run automation_scraper.py first to create brain/sunat_session.json"
-        )
+        # Fallback to default for backwards compatibility
+        cookie_file = os.path.join(os.path.dirname(__file__), "sunat_session.json")
+        if not os.path.exists(cookie_file):
+            raise FileNotFoundError(
+                f"Session file for RUC {ruc} not found. Run automation_scraper.py --ruc {ruc} first."
+            )
     with open(cookie_file, "r") as f:
         return json.load(f)
 
@@ -218,68 +223,93 @@ async def _search_individual(
     page,
     frame,
     query: CpeQuery,
-    out_path: Path,
+    out_dir: Path,
+    base_name: str,
     prefer: DownloadPrefer,
     debug_dir: Optional[Path] = None,
-) -> Optional[Path]:
+    tmp_downloads_dir: Optional[Path] = None,
+) -> List[Path]:
     """Fill the individual CPE search form, check results, and download.
 
     This function handles the 'Consulta Individual' tab inside the
     Consulta de Comprobantes page.
     """
-    base_name = f"{query.ruc_emisor}-{query.tipo}-{query.serie}-{query.numero}"
     print(f"Query: {base_name}")
 
     # Check if we are in the new Angular form by looking for 'rucEmisor' formcontrolname
     is_angular = await frame.locator("input[formcontrolname='rucEmisor']").count() > 0
 
     if is_angular:
-        # 1. Select Recibido (assuming we are searching for purchases/supplier invoices)
-        # In a generic way, if we need to type a different RUC, we MUST click Recibido
         try:
-            await frame.locator("#recibido").check(force=True)
-            await asyncio.sleep(0.5)
-        except Exception:
-            pass
-
-        # 2. Fill RUC
-        try:
-            await frame.locator("input[formcontrolname='rucEmisor']").fill(query.ruc_emisor)
+            if query.book == "sales":
+                await frame.locator("#emitido").check(force=True)
+                await asyncio.sleep(0.5)
+                try:
+                    await frame.locator("input[formcontrolname='rucReceptor']").fill(query.ruc_emisor, timeout=2000)
+                except Exception:
+                    pass
+            else:
+                await frame.locator("#recibido").check(force=True)
+                await asyncio.sleep(0.5)
+                try:
+                    await frame.locator("input[formcontrolname='rucEmisor']").fill(query.ruc_emisor, timeout=2000)
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"   Could not fill rucEmisor: {e}")
+            print(f"   Could not configure Recibido/Emitido and fill RUC: {e}")
 
         # 3. Tipo Comprobante (PrimeNG dropdown)
         try:
             dropdown = frame.locator("p-dropdown[formcontrolname='tipoComprobanteI']")
-            await dropdown.click()
+            await dropdown.click(timeout=2000)
             await asyncio.sleep(0.5)
             
-            tipo_map = {
-                "01": "Factura",
-                "03": "Boleta",
-                "07": "Crédito",
-                "08": "Débito"
-            }
-            label = tipo_map.get(query.tipo, "Factura")
+            tipo_str = str(query.tipo).strip().zfill(2)
+            serie_str = str(query.serie).strip().upper()
             
-            # Look for the dropdown item containing the code e.g. "01 - " or the label
-            item_loc = frame.locator(f"p-dropdownitem li:has-text('{query.tipo} - ')")
-            if await item_loc.count() == 0:
-                item_loc = frame.locator(f"p-dropdownitem li:has-text('{label}')")
-                
+            exact_text = "Factura" # Default
+            if tipo_str == "01":
+                exact_text = "Factura"
+            elif tipo_str == "03":
+                exact_text = "Boleta de Venta"
+            elif tipo_str == "02":
+                exact_text = "Recibo por Honorarios"
+            elif tipo_str == "04":
+                exact_text = "Liquidación de compra"
+            elif tipo_str == "07":
+                if serie_str.startswith("B"):
+                    exact_text = "Boleta de Venta - Nota de Crédito"
+                elif serie_str.startswith("E"):
+                    exact_text = "Factura - Nota de Crédito" # Los E001 del portal SUNAT suelen ser para Facturas en SIRE Compras
+                else:
+                    exact_text = "Factura - Nota de Crédito"
+            elif tipo_str == "08":
+                if serie_str.startswith("B"):
+                    exact_text = "Boleta de Venta - Nota de Débito"
+                else:
+                    exact_text = "Factura - Nota de Débito"
+            
+            # Use exact match pseudoclass :text-is() to avoid selecting "Factura - Nota de Crédito" when we just want "Factura"
+            item_loc = frame.locator(f"p-dropdownitem li:text-is('{exact_text}')")
+            
             if await item_loc.count() > 0:
-                await item_loc.first.click()
+                await item_loc.first.click(timeout=2000)
             else:
-                print(f"   Could not find dropdown option for {query.tipo}")
-                # Click outside to close dropdown
-                await frame.evaluate("document.body.click()")
+                print(f"   Could not find exact dropdown option for {exact_text} (tipo {query.tipo})")
+                # Fallback to partial match just in case SUNAT changed the text slightly
+                fallback_loc = frame.locator(f"p-dropdownitem li:has-text('{exact_text}')")
+                if await fallback_loc.count() > 0:
+                    await fallback_loc.first.click(timeout=2000)
+                else:
+                    # Click outside to close dropdown
+                    await frame.evaluate("document.body.click()")
         except Exception as e:
             print(f"   Could not select tipoComprobante: {e}")
 
         # 4. Serie & Numero
         try:
-            await frame.locator("input[formcontrolname='serieComprobante']").fill(query.serie)
-            await frame.locator("input[formcontrolname='numeroComprobante']").fill(query.numero)
+            await frame.locator("input[formcontrolname='serieComprobante']").fill(query.serie, timeout=2000)
+            await frame.locator("input[formcontrolname='numeroComprobante']").fill(query.numero, timeout=2000)
         except Exception as e:
             print(f"   Could not fill serie/numero: {e}")
             
@@ -354,7 +384,7 @@ async def _search_individual(
                 (debug_dir / f"not_found-{base_name}.html").write_text(html, encoding="utf-8")
             except Exception:
                 pass
-        return None
+        return []
 
     print(f"   Found: {base_name}")
     
@@ -389,24 +419,26 @@ async def _search_individual(
     ]
 
     targets = []
-    
-    # Check XML selectors
-    for sel in xml_sels:
-        try:
-            if await frame.locator(sel).count() > 0:
-                targets.append(("xml", frame.locator(sel).first))
-                break
-        except Exception:
-            continue
-            
-    # Check PDF selectors
-    for sel in pdf_sels:
-        try:
-            if await frame.locator(sel).count() > 0:
-                targets.append(("pdf", frame.locator(sel).first))
-                break
-        except Exception:
-            continue
+
+    if prefer in ("xml", "either"):
+        # Check XML selectors
+        for sel in xml_sels:
+            try:
+                if await frame.locator(sel).count() > 0:
+                    targets.append(("xml", frame.locator(sel).first))
+                    break
+            except Exception:
+                continue
+
+    if prefer in ("pdf", "either"):
+        # Check PDF selectors
+        for sel in pdf_sels:
+            try:
+                if await frame.locator(sel).count() > 0:
+                    targets.append(("pdf", frame.locator(sel).first))
+                    break
+            except Exception:
+                continue
             
     # Fallback if neither found
     if not targets:
@@ -439,42 +471,99 @@ async def _search_individual(
                 await asyncio.sleep(0.3)
         except Exception:
             pass
-        return None
+        return []
 
     # Download the files
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     downloaded_paths = []
     
     for file_type, target in targets:
         try:
-            async with page.expect_download(timeout=45000) as dl_info:
-                await target.click()
+            import time
+            import shutil
+            
+            download_task = asyncio.ensure_future(
+                page.context.wait_for_event("download", timeout=15000)
+            )
+
+            await target.click()
+            
+            # Check for the warning modal "El archivo se ha descargado previamente"
+            try:
+                accept_btn = frame.locator("button:has-text('Aceptar'), .swal2-confirm")
+                if await accept_btn.count() > 0:
+                    await accept_btn.first.click(timeout=2000)
+            except Exception:
+                pass
                 
-                # Check for the warning modal "El archivo se ha descargado previamente"
-                try:
-                    accept_btn = frame.locator("button:has-text('Aceptar'), .swal2-confirm")
-                    if await accept_btn.count() > 0:
-                        await accept_btn.first.click(timeout=2000)
-                except Exception:
-                    pass
+            # Active polling loop for Chromium silent downloads
+            recovered = False
+            start_wait = time.time()
+            while time.time() - start_wait < 15: # 15 seconds max wait
+                if download_task.done() and not download_task.cancelled() and not isinstance(download_task.exception(), Exception):
+                    break # The official download event fired!
                     
-            download = await dl_info.value
-            suggested = download.suggested_filename or "download"
-            ext = os.path.splitext(suggested)[1] or f".{file_type}"
-            
-            # Use specific extension if possible to avoid overwriting
-            if ext.lower() == ".bin" and file_type != "fallback":
-                ext = f".{file_type}"
+                if tmp_downloads_dir and tmp_downloads_dir.exists():
+                    files = list(tmp_downloads_dir.glob("*"))
+                    if files:
+                        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                        newest = files[0]
+                        # Check if it's a recent file, not a temporary crdownload, and has size > 0
+                        if time.time() - newest.stat().st_mtime < 20 and not newest.name.endswith('.crdownload'):
+                            # File is ready!
+                            final_dir = out_dir / (file_type if file_type != "fallback" else "pdf")
+                            final_dir.mkdir(parents=True, exist_ok=True)
+                            final_path = final_dir / f"{base_name}.{file_type if file_type != 'fallback' else 'pdf'}"
+                            
+                            shutil.copy2(newest, final_path)
+                            try:
+                                newest.unlink()
+                            except:
+                                pass
+                                
+                            downloaded_paths.append(final_path)
+                            recovered = True
+                            print(f"   Recovered downloaded file actively: {newest.name}")
+                            
+                            # Cancel the official wait task since we got the file
+                            if not download_task.done():
+                                download_task.cancel()
+                            break
+                await asyncio.sleep(1)
+
+            if recovered:
+                await asyncio.sleep(0.5)
+                continue # move to next target
                 
-            final_path = out_path.with_suffix(ext)
-            await download.save_as(str(final_path))
-            downloaded_paths.append(final_path)
-            
-            # Short delay between downloads
-            await asyncio.sleep(1)
-            
+            # If we reach here and it's not recovered, maybe the official download event succeeded
+            try:
+                download = await download_task
+                suggested = download.suggested_filename or "download"
+                ext = os.path.splitext(suggested)[1] or f".{file_type}"
+                
+                if ext.lower() == ".bin" and file_type != "fallback":
+                    ext = f".{file_type}"
+                    
+                ext_lower = ext.lower()
+                if ext_lower in (".xml", ".zip"):
+                    subfolder = "xml"
+                elif ext_lower == ".pdf":
+                    subfolder = "pdf"
+                else:
+                    subfolder = "otros"
+                    
+                final_dir = out_dir / subfolder
+                final_dir.mkdir(parents=True, exist_ok=True)
+                
+                final_path = final_dir / f"{base_name}{ext}"
+                await download.save_as(str(final_path))
+                downloaded_paths.append(final_path)
+                await asyncio.sleep(0.5)
+            except Exception as wait_err:
+                # If both polling and official download failed
+                print(f"   Download failed for {file_type}: Timeout or error -> {wait_err}")
+
         except Exception as e:
-            print(f"   Download failed for {file_type}: {e}")
+            print(f"   Download click or process failed for {file_type}: {e}")
             
     # Close modal for next query
     try:
@@ -487,15 +576,9 @@ async def _search_individual(
         pass
         
     if not downloaded_paths:
-        return None
-        
-    # Return the first path to keep backwards compatibility, or maybe return all if needed.
-    # The CLI currently expects a single Path or string, but returning the primary one is fine.
-    # Actually, returning the downloaded_paths list might break the caller, let's just return the XML one if possible, or the first one.
-    xml_paths = [p for p in downloaded_paths if str(p).endswith(".xml")]
-    if xml_paths:
-        return xml_paths[0]
-    return downloaded_paths[0]
+        return []
+
+    return downloaded_paths
 
 
 async def _clear_form(frame, page=None):
@@ -527,6 +610,10 @@ async def _clear_form(frame, page=None):
 # ---------------------------------------------------------------------------
 # Batch processing
 # ---------------------------------------------------------------------------
+import re
+
+def _sanitize_folder_name(name: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 async def run_batch(
     queries: Iterable[CpeQuery],
@@ -542,102 +629,141 @@ async def run_batch(
     Returns a list of result dicts with keys:
       status, ruc_emisor, tipo, serie, numero, period, book, path, error
     """
-    cookies = _load_sunat_session_cookies()
     out_base = Path(outdir).expanduser().resolve()
     results: list[dict] = []
 
+    # Group queries by ruc_cliente so we can load the correct session cookie
+    from collections import defaultdict
+    queries_by_client = defaultdict(list)
+    for q in queries:
+        queries_by_client[q.ruc_cliente].append(q)
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            user_agent=_default_user_agent(),
-            accept_downloads=True,
-        )
-        await context.add_cookies(cookies)
-
-        page = await context.new_page()
-        print("Navigating to SUNAT Main Menu…")
-        await page.goto(MENU_URL)
-        await _dismiss_overlays(page)
-
-        # Navigate to the Consulta de Comprobantes form
-        page, frame = await _navigate_to_consulta_cpe(page)
-
-        # Dump the frame HTML for debug (first time only)
-        try:
-            debug_html = await frame.content()
-            debug_path = out_base / "_debug_consulta_form.html"
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            debug_path.write_text(debug_html, encoding="utf-8")
-            print(f"   Debug form HTML saved to: {debug_path}")
-        except Exception:
-            pass
-
-        # Dump available inputs/buttons for debugging
-        try:
-            fields = await frame.evaluate(
-                "Array.from(document.querySelectorAll('input,select,button,a[href]')).map("
-                "e=>({tag:e.tagName,name:e.name||'',id:e.id||'',type:e.type||'',text:(e.innerText||e.value||'').trim().substring(0,60)}))"
-            )
-            print(f"   Form has {len(fields)} interactive elements")
-            for f in fields[:30]:
-                print(f"      {f}")
-        except Exception:
-            pass
-
-        count = 0
-        for q in queries:
-            count += 1
-            if limit and count > limit:
-                break
-
-            safe_period = (q.period or "unknown").strip() or "unknown"
-            safe_book = (q.book or "cpe").strip() or "cpe"
-            base_name = f"{q.ruc_emisor}-{q.tipo}-{q.serie}-{q.numero}"
-            out_path = out_base / safe_period / safe_book / base_name
-            debug_dir = out_base / safe_period / safe_book / "debug"
-
-            # Check if frame detached or reloaded
+        tmp_downloads_dir = out_base / "tmp_downloads"
+        tmp_downloads_dir.mkdir(parents=True, exist_ok=True)
+        browser = await p.chromium.launch(headless=headless, downloads_path=str(tmp_downloads_dir))
+        
+        for ruc_cliente, client_queries in queries_by_client.items():
+            print(f"\n--- Processing {len(client_queries)} queries for client {ruc_cliente} ---")
+            
             try:
-                if frame.is_detached():
-                    print("   Frame detached, re-navigating to menu...")
-                    page, frame = await _navigate_to_consulta_cpe(page)
+                cookies = _load_sunat_session_cookies(ruc_cliente)
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                for q in client_queries:
+                    results.append(_result_dict(q, "error", error="No session cookies found"))
+                continue
+
+            context = await browser.new_context(
+                user_agent=_default_user_agent(),
+                accept_downloads=True,
+            )
+            await context.add_cookies(cookies)
+
+            page = await context.new_page()
+            print(f"Navigating to SUNAT Main Menu for {ruc_cliente}…")
+            await page.goto(MENU_URL)
+            await _dismiss_overlays(page)
+
+            # Navigate to the Consulta de Comprobantes form
+            page, frame = await _navigate_to_consulta_cpe(page)
+
+            # Dump the frame HTML for debug (first time only)
+            try:
+                debug_html = await frame.content()
+                debug_path = out_base / "_debug_consulta_form.html"
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                debug_path.write_text(debug_html, encoding="utf-8")
+                print(f"   Debug form HTML saved to: {debug_path}")
             except Exception:
                 pass
 
-            # Skip already downloaded
-            if skip_existing:
-                if any(out_path.with_suffix(ext).exists() for ext in (".xml", ".XML", ".pdf", ".PDF")):
-                    results.append(_result_dict(q, "skipped"))
-                    continue
-
+            # Dump available inputs/buttons for debugging
             try:
-                saved = await _search_individual(
-                    page=page,
-                    frame=frame,
-                    query=q,
-                    out_path=out_path,
-                    prefer=prefer,
-                    debug_dir=debug_dir,
+                fields = await frame.evaluate(
+                    "Array.from(document.querySelectorAll('input,select,button,a[href]')).map("
+                    "e=>({tag:e.tagName,name:e.name||'',id:e.id||'',type:e.type||'',text:(e.innerText||e.value||'').trim().substring(0,60)}))"
                 )
+                print(f"   Form has {len(fields)} interactive elements")
+                for f in fields[:30]:
+                    print(f"      {f}")
+            except Exception:
+                pass
 
-                if saved:
-                    results.append(_result_dict(q, "ok", path=str(saved)))
-                    print(f"Saved: {saved}")
-                else:
-                    results.append(_result_dict(q, "not_found"))
-                    print(f"Not found / no download: {base_name}")
+            count = 0
+            for q in client_queries:
+                count += 1
+                if limit and count > limit:
+                    break
 
-                # Clear the form for the next query
-                await _clear_form(frame, page=page)
+                safe_period = (q.period or "unknown").strip() or "unknown"
+                safe_book = (q.book or "cpe").strip() or "cpe"
+                base_name = f"{q.ruc_emisor}-{q.tipo}-{q.serie}-{q.numero}"
+                
+                safe_ruc_cliente = q.ruc_cliente or "unknown_ruc"
+                safe_rs_cliente = _sanitize_folder_name(q.razon_social_cliente) if q.razon_social_cliente else "Empresa"
+                folder_client = f"{safe_rs_cliente} {safe_ruc_cliente}".strip()
+                
+                out_dir = out_base / folder_client / safe_period / safe_book
+                debug_dir = out_dir / "debug"
 
-            except Exception as e:
-                results.append(_result_dict(q, "error", error=str(e)))
-                print(f"Error: {e}")
-                # Try to recover by clearing form
+                # Check if frame detached or reloaded
                 try:
-                    await _clear_form(frame, page=page)
+                    if frame.is_detached():
+                        print("   Frame detached, re-navigating to menu...")
+                        page, frame = await _navigate_to_consulta_cpe(page)
                 except Exception:
                     pass
+
+                # Skip already downloaded
+                if skip_existing:
+                    xml_path = out_dir / "xml" / f"{base_name}.xml"
+                    zip_path = out_dir / "xml" / f"{base_name}.zip"
+                    pdf_path = out_dir / "pdf" / f"{base_name}.pdf"
+                    
+                    if xml_path.exists() or zip_path.exists() or pdf_path.exists():
+                        # We will prioritize returning the XML path if it exists
+                        existing_path = xml_path if xml_path.exists() else (zip_path if zip_path.exists() else pdf_path)
+                        results.append(_result_dict(q, "skipped", path=str(existing_path)))
+                        continue
+
+                try:
+                    saved = await _search_individual(
+                        page=page,
+                        frame=frame,
+                        query=q,
+                        out_dir=out_dir,
+                        base_name=base_name,
+                        prefer=prefer,
+                        debug_dir=debug_dir,
+                        tmp_downloads_dir=tmp_downloads_dir,
+                    )
+
+                    if saved:
+                        results.append(_result_dict(q, "ok", path=str(saved)))
+                        print(f"Saved: {saved}")
+                    else:
+                        results.append(_result_dict(q, "not_found"))
+                        print(f"Not found / no download: {base_name}")
+
+                    # Clear the form for the next query
+                    await _clear_form(frame, page=page)
+
+                except Exception as e:
+                    results.append(_result_dict(q, "error", error=str(e)))
+                    print(f"Error: {e}")
+                    # SUNAT a veces se congela o entra en bucle.
+                    # Para recuperarnos, recargamos la página por completo y volvemos a abrir el menú.
+                    try:
+                        print("   La página parece haberse congelado. Recargando el navegador...")
+                        await page.reload()
+                        await asyncio.sleep(3)
+                        page, frame = await _navigate_to_consulta_cpe(page)
+                    except Exception as e2:
+                        print(f"   Fallo al recargar la página: {e2}")
+            
+            # Close context for this client
+            await context.close()
 
         await browser.close()
 

@@ -38,12 +38,13 @@ BookType = Literal["sales", "purchases"]
 
 @dataclass(frozen=True)
 class SunatClient:
-    name: str
-    ruc: str
-    sol_username: str
-    sol_password: str
-    api_client_id: str
-    api_client_secret: str
+    id: str = None
+    name: str = ""
+    ruc: str = ""
+    sol_username: str = ""
+    sol_password: str = ""
+    api_client_id: str = ""
+    api_client_secret: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ class RunItem:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[1]
 
 
 def _load_env() -> None:
@@ -179,25 +180,105 @@ def _wait_for_ticket_with_progress(
     raise TimeoutError(f"Ticket {ticket_id} timeout after {max_wait}s")
 
 
-def _load_clients_from_db() -> list[SunatClient]:
-    from app.brain.db.supabase_client import get_supabase
-    supabase = get_supabase()
-    
-    response = supabase.table("clientes").select("*").eq("activo", True).execute()
-    clients = []
-    
-    for row in response.data:
-        clients.append(
-            SunatClient(
-                name=row["razon_social"],
-                ruc=row["ruc"],
-                sol_username=row["usuario_sol"],
-                sol_password=row["clave_sol"],
-                api_client_id=row["client_id_api"],
-                api_client_secret=row["client_secret_api"],
+def _default_clients_file() -> Path:
+    # Can be overridden via .env: SIRE_CLIENTS_FILE=clients/sunat_clients.csv
+    configured = (os.getenv("SIRE_CLIENTS_FILE") or "").strip()
+    if configured:
+        p = Path(configured)
+        if not p.is_absolute():
+            p = _repo_root() / p
+        return p
+    return _repo_root() / "clients" / "sunat_clients.csv"
+
+
+def _example_clients_file() -> Path:
+    return _repo_root() / "clients" / "sunat_clients.example.csv"
+
+
+def _load_clients_csv(path: Path) -> list[SunatClient]:
+    if not path.exists():
+        return []
+
+    clients: list[SunatClient] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        # Detect delimiter for common variants (, ; \t |)
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except Exception:
+            dialect = csv.excel
+
+        reader = csv.DictReader(f, dialect=dialect)
+        required = {
+            "name",
+            "ruc",
+            "sol_username",
+            "sol_password",
+            "api_client_id",
+            "api_client_secret",
+        }
+        fieldnames = set(reader.fieldnames or [])
+
+        # If header is missing or invalid, fall back to a headerless 6-column format.
+        # Order: name,ruc,sol_username,sol_password,api_client_id,api_client_secret
+        if not reader.fieldnames or not required.issubset(fieldnames):
+            f.seek(0)
+            raw = csv.reader(f, dialect=dialect)
+            for row in raw:
+                if not row or all(not (c or "").strip() for c in row):
+                    continue
+                if len(row) < 6:
+                    raise SystemExit(
+                        f"Invalid clients CSV in {path}: expected 6 columns per row. "
+                        "Order must be: name,ruc,sol_username,sol_password,api_client_id,api_client_secret"
+                    )
+
+                name, ruc, sol_username, sol_password, api_client_id, api_client_secret = [
+                    (c or "").strip() for c in row[:6]
+                ]
+                if not name or not ruc:
+                    continue
+                if len(ruc) != 11 or not ruc.isdigit():
+                    raise SystemExit(f"Invalid RUC in clients file ({path}): {ruc} (client {name})")
+
+                clients.append(
+                    SunatClient(
+                        name=name,
+                        ruc=ruc,
+                        sol_username=sol_username,
+                        sol_password=sol_password,
+                        api_client_id=api_client_id,
+                        api_client_secret=api_client_secret,
+                    )
+                )
+
+            return clients
+
+        for row in reader:
+            name = (row.get("name") or "").strip()
+            ruc = (row.get("ruc") or "").strip()
+            sol_username = (row.get("sol_username") or "").strip()
+            sol_password = (row.get("sol_password") or "").strip()
+            api_client_id = (row.get("api_client_id") or "").strip()
+            api_client_secret = (row.get("api_client_secret") or "").strip()
+
+            if not name or not ruc:
+                continue
+            if len(ruc) != 11 or not ruc.isdigit():
+                raise SystemExit(f"Invalid RUC in clients file ({path}): {ruc} (client {name})")
+
+            clients.append(
+                SunatClient(
+                    name=name,
+                    ruc=ruc,
+                    sol_username=sol_username,
+                    sol_password=sol_password,
+                    api_client_id=api_client_id,
+                    api_client_secret=api_client_secret,
+                )
             )
-        )
-        
+
     return clients
 
 
@@ -237,9 +318,13 @@ def main() -> int:
     )
 
     parser.add_argument(
-        "--no-db",
-        action="store_true",
-        help="Do not bulk insert TXT into Supabase DB",
+        "--clients-file",
+        type=str,
+        default="",
+        help=(
+            "CSV file with multiple clients. If omitted, uses SIRE_CLIENTS_FILE from .env, "
+            "or falls back to single-client SUNAT_* env vars."
+        ),
     )
     parser.add_argument(
         "--client",
@@ -276,26 +361,38 @@ def main() -> int:
         help="Limit number of XMLs to download (useful for testing)",
     )
 
-    parser.add_argument(
-        "--skip-sire",
-        action="store_true",
-        help="Skip SUNAT SIRE download if existing TXT is found",
-    )
     args = parser.parse_args()
 
     _ensure_import_path()
     _load_env()
 
-    from app.brain.integrations.sunat_sire import SunatSireClient  # local import after sys.path fix
+    from brain.integrations.sunat_sire import SunatSireClient  # local import after sys.path fix
 
-    # Fetch clients from database
-    clients_from_db = _load_clients_from_db()
-
-    if clients_from_db:
-        clients = _select_clients(clients_from_db, list(args.client))
-        print(f"Using clients from Supabase (count={len(clients)})")
+    # Determine clients source (DB)
+    from brain.db.supabase_client import get_supabase
+    
+    print("Fetching clients from Supabase database...")
+    supabase = get_supabase()
+    response = supabase.table("clientes").select("*").execute()
+    db_clients = response.data
+    
+    clients = []
+    for row in db_clients:
+        clients.append(SunatClient(
+            id=row.get("id"),
+            name=row.get("razon_social") or row.get("ruc"),
+            ruc=row.get("ruc"),
+            sol_username=row.get("usuario_sol", ""),
+            sol_password=row.get("clave_sol", ""),
+            api_client_id=row.get("client_id_api", ""),
+            api_client_secret=row.get("client_secret_api", "")
+        ))
+        
+    if args.client:
+        clients = _select_clients(clients, list(args.client))
+        print(f"Filtered to {len(clients)} clients.")
     else:
-        raise SystemExit("No active clients found in Supabase 'clientes' table.")
+        print(f"Found {len(clients)} clients in database.")
 
     books: list[BookType] = [b for b in args.books]
     outdir = Path(args.outdir).expanduser().resolve()
@@ -313,10 +410,6 @@ def main() -> int:
         print(f"Client: {sunat_client.name} ({sunat_client.ruc})")
         print(f"==============================")
 
-        # Load actual client ID from db
-        from app.brain.db.supabase_client import get_supabase
-        client_id_uuid = get_supabase().table("clientes").select("id").eq("ruc", sunat_client.ruc).execute().data[0]["id"]
-        
         client = SunatSireClient(
             client_id=sunat_client.api_client_id,
             client_secret=sunat_client.api_client_secret,
@@ -389,9 +482,16 @@ def main() -> int:
                         _save_text(txt_path, txt_content)
                         print(f"Saved TXT: {txt_path}")
                         
-                        if not args.no_db:
-                            from app.brain.db.sire_db_inserter import parse_and_insert_sire_txt
-                            parse_and_insert_sire_txt(client_id_uuid, item.period, item.book_type, txt_path)
+                        # METER LA DATA PRELIMINAR A LA BD DE SUPABASE
+                        if getattr(sunat_client, "id", None):
+                            from brain.db.sire_db_inserter import parse_and_insert_sire_txt
+                            print(f"Inserting into Supabase DB for {sunat_client.ruc} - {item.period}")
+                            parse_and_insert_sire_txt(
+                                client_id=sunat_client.id, 
+                                periodo=item.period, 
+                                book_type=item.book_type, 
+                                txt_path=txt_path
+                            )
                 if not args.no_excel and txt_path:
                     import subprocess
                     
@@ -401,7 +501,7 @@ def main() -> int:
                         base_xml_out = _repo_root() / "downloads" / "xml"
                         cmd = [
                             sys.executable,
-                            str(_repo_root() / "app" / "brain" / "sire_xml_scrape_cli.py"),
+                            str(_repo_root() / "brain" / "sire_xml_scrape_cli.py"),
                             "--sire-txt", str(txt_path),
                             "--book", item.book_type,
                             "--outdir", str(base_xml_out),
@@ -415,7 +515,7 @@ def main() -> int:
                         subprocess.run(cmd, check=False, env=env)
                         xml_dir = base_xml_out / item.period / item.book_type
 
-                    from app.brain.sire_txt_to_excel import convert_one  # local import
+                    from brain.sire_txt_to_excel import convert_one  # local import
 
                     xlsx_path = txt_path.with_suffix(".xlsx")
                     sheet_name = f"{item.book_type}_{item.period}"[:31]

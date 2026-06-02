@@ -1,6 +1,9 @@
 import csv
 from pathlib import Path
-from app.brain.db.supabase_client import get_supabase
+try:
+    from app.brain.db.supabase_client import get_supabase
+except ModuleNotFoundError:
+    from brain.db.supabase_client import get_supabase
 
 def parse_and_insert_sire_txt(client_id: str, periodo: str, book_type: str, txt_path: Path):
     """
@@ -24,6 +27,10 @@ def parse_and_insert_sire_txt(client_id: str, periodo: str, book_type: str, txt_
         # Verificamos si la primera fila contiene texto de cabecera como "RUC" o "Periodo".
         first_row = next(reader, None)
         if not first_row:
+            return
+            
+        # Omitir filas vacías
+        if len(first_row) < 3:
             return
             
         if first_row[0].strip().upper() == "RUC" or first_row[2].strip().upper() == "PERIODO":
