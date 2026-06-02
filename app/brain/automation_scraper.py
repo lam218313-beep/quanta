@@ -30,7 +30,7 @@ async def run(ruc: str):
 
         print(f"🚀 Opening SUNAT Login Page for RUC {ruc}...")
         await page.goto(SUNAT_LOGIN_URL)
-        await asyncio.sleep(2)
+        await page.wait_for_load_state('domcontentloaded')
         
         # Intentar autocompletado si hay credenciales
         _ensure_import_path()
@@ -60,7 +60,7 @@ async def run(ruc: str):
         print("   (This step is required to generate the specific cookies we need for XML downloads)")
         
         # Smart Session Detection: Poll for cookies
-        max_retries = 100 # 5 minutes
+        max_retries = 120 # 2 minutes (polling every 1s)
         found_session = False
         
         try:
@@ -80,7 +80,7 @@ async def run(ruc: str):
                 # Fallback Success: Found enough TS cookies (user might be in menu but not legacy app)
                 # We will accept this but warn the user
                 ts_cookies = [c for c in cookies if c['name'].startswith("TS")]
-                if len(ts_cookies) >= 2 and i > 10:
+                if len(ts_cookies) >= 2 and i > 3:
                      print(f"⚠️ Ambiguous Login: Found {len(ts_cookies)} TS cookies but no ITCONS.")
                      print("   Proceeding... (Hope this works!)")
                      found_session = True
@@ -89,15 +89,13 @@ async def run(ruc: str):
                 if i % 5 == 0:
                     print(f"   ... waiting. Please open 'Consulta Validez' inside the menu. (Attempt {i}/{max_retries})")
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
             
             # Extract Cookies Final
             cookies = await context.cookies()
             
             if found_session:
                 print(f"🎉 Success! Extracted {len(cookies)} cookies.")
-                print("   (Wait 5s to ensure full loading...)")
-                await asyncio.sleep(5)
                 
                 # Save cookies to a file based on RUC
                 cookie_file = os.path.join(os.path.dirname(__file__), f"sunat_session_{ruc}.json")
@@ -110,8 +108,7 @@ async def run(ruc: str):
         except Exception as e:
             print(f"❌ Error during scrape: {e}")
         
-        print("👋 Closing browser in 5 seconds...")
-        await asyncio.sleep(5)
+        print("👋 Closing browser...")
         await browser.close()
 
 if __name__ == "__main__":

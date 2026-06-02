@@ -47,6 +47,10 @@ def _run_sync_process(task_id: str, command: list, cwd: str):
                 encoding='utf-8',
                 errors='replace'
             )
+            # Store the actual process object so it can be killed
+            if task_id in running_tasks:
+                running_tasks[task_id] = process
+                
             for line in process.stdout:
                 # Write to file and print to console
                 f.write(line)
@@ -69,6 +73,40 @@ async def run_command_in_background(task_id: str, command: list, cwd: str):
     thread = threading.Thread(target=_run_sync_process, args=(task_id, command, cwd))
     thread.daemon = True
     thread.start()
+
+@app.get("/api/bot/status")
+def get_running_tasks():
+    """Returns all currently running task IDs."""
+    tasks = []
+    for task_id, proc in running_tasks.items():
+        pid = proc.pid if hasattr(proc, 'pid') else None
+        tasks.append({"task_id": task_id, "pid": pid})
+    return {"running_tasks": tasks, "count": len(tasks)}
+
+@app.post("/api/bot/reset")
+def reset_running_tasks(task_id: str = None):
+    """
+    Kills and clears stuck running tasks.
+    If task_id is provided, only clears that task.
+    Otherwise clears ALL running tasks.
+    """
+    killed = []
+    to_remove = [task_id] if task_id and task_id in running_tasks else list(running_tasks.keys())
+    
+    for tid in to_remove:
+        proc = running_tasks.get(tid)
+        if proc and hasattr(proc, 'kill'):
+            try:
+                proc.kill()
+                killed.append(tid)
+            except Exception:
+                pass
+        if tid in running_tasks:
+            del running_tasks[tid]
+            if tid not in killed:
+                killed.append(tid)
+                
+    return {"cleared": killed, "message": f"Cleared {len(killed)} stuck task(s). You can now restart the bot."}
 
 @app.post("/api/bot/download-api")
 async def trigger_download_api(req: BotRequest, background_tasks: BackgroundTasks):
@@ -117,6 +155,20 @@ async def trigger_download_fisicos(req: BotRequest, background_tasks: Background
     running_tasks[task_id] = True
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
     return {"status": "started", "message": f"Started XML Download bot for {req.ruc}", "task_id": task_id}
+
+@app.post("/api/bot/sync-files")
+async def trigger_sync_files(background_tasks: BackgroundTasks):
+    """Scans all local download folders and reconciles with Supabase DB."""
+    task_id = "sync_files"
+    if task_id in running_tasks:
+        return {"status": "already_running", "message": "Sync is already running.", "task_id": task_id}
+        
+    cmd = [sys.executable, "app/brain/db/sync_files.py"]
+    root_dir = Path(__file__).parent.parent
+    
+    running_tasks[task_id] = True
+    background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
+    return {"status": "started", "message": "Sincronizando archivos físicos con base de datos...", "task_id": task_id}
 
 @app.post("/api/bot/enrich-xml")
 async def trigger_enrich_xml(req: BotRequest, background_tasks: BackgroundTasks):

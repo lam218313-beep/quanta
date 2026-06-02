@@ -204,6 +204,19 @@ function App() {
     fetchTableData()
   }, [selectedCliente, selectedPeriodo, selectedPhase])
 
+  const handleResetBots = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/bot/reset`, { method: 'POST' })
+      const result = await response.json()
+      setNotification(`🔄 ${result.message}`)
+      setActiveTaskId(null)
+      setTerminalLogs('')
+      setTimeout(() => setNotification(''), 4000)
+    } catch (e) {
+      setNotification('❌ Error conectando con el servidor')
+    }
+  }
+
   const handleBotAction = async (action) => {
     const cliente = clientes.find(c => c.id === selectedCliente)
     if (!cliente) return
@@ -362,6 +375,20 @@ function App() {
           </button>
           <button disabled={!selectedCliente} onClick={() => handleBotAction('classify-ai')} className="bot-btn" style={{background: '#8b5cf6', color: 'white'}}>
             <BarChart3 size={16}/> 5. Clasificar con IA
+          </button>
+          <button onClick={async () => {
+            setNotification('🔄 Sincronizando archivos físicos con base de datos...')
+            try {
+              const res = await fetch(`${API_BASE_URL}/api/bot/sync-files`, { method: 'POST' })
+              const r = await res.json()
+              setNotification(`✅ ${r.message}`)
+              setTimeout(() => setNotification(''), 5000)
+            } catch(e) { setNotification('❌ Error al sincronizar') }
+          }} className="bot-btn" style={{background: '#0ea5e9', color: 'white'}} title="Escanea carpetas locales y actualiza Supabase con los archivos que realmente existen">
+            🔁 Sincronizar Archivos
+          </button>
+          <button onClick={handleResetBots} className="bot-btn" style={{background: '#ef4444', color: 'white', marginLeft: 'auto'}} title="Libera bots bloqueados. Úsalo si ves 'already running' pero no pasa nada.">
+            ⚠️ Reset Bots
           </button>
         </div>
         {notification && <div className="notification">{notification}</div>}

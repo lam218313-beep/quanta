@@ -481,6 +481,12 @@ async def _search_individual(
             import time
             import shutil
             
+            # SNAPSHOT: record what's already in tmp BEFORE clicking
+            # This prevents picking up leftover files from a previous query
+            existing_in_tmp = set()
+            if tmp_downloads_dir and tmp_downloads_dir.exists():
+                existing_in_tmp = {f.name for f in tmp_downloads_dir.glob("*")}
+            
             # AUMENTAMOS EL TIMEOUT A 30 SEGUNDOS (30000ms) PORQUE SUNAT ES LENTO CON LOS ZIP
             download_task = asyncio.ensure_future(
                 page.context.wait_for_event("download", timeout=30000)
@@ -507,11 +513,14 @@ async def _search_individual(
                     
                 if tmp_downloads_dir and tmp_downloads_dir.exists():
                     files = list(tmp_downloads_dir.glob("*"))
-                    if files:
-                        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                        newest = files[0]
-                        # Check if it's a recent file, not a temporary crdownload, and has size > 0
-                        if time.time() - newest.stat().st_mtime < 35 and not newest.name.endswith('.crdownload'):
+                    # KEY FIX: Only consider files that WEREN'T there before we clicked
+                    new_files = [f for f in files if f.name not in existing_in_tmp]
+                    if new_files:
+                        new_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                        newest = new_files[0]
+                        # Check: not a temp file, and size > 1KB (fully written)
+                        file_stat = newest.stat()
+                        if not newest.name.endswith('.crdownload') and file_stat.st_size > 1024:
                             
                             # SOLUCIÓN: Detectar la extensión real (sea .zip, .xml, o .pdf)
                             ext_real = newest.suffix.lower()
@@ -531,19 +540,24 @@ async def _search_individual(
                             final_path = final_dir / f"{base_name}{ext_real}"
                             
                             shutil.copy2(newest, final_path)
-                            try:
-                                newest.unlink()
-                            except:
-                                pass
-                                
-                            downloaded_paths.append(final_path)
-                            recovered = True
-                            print(f"   Recovered downloaded file actively: {newest.name} -> guardado como {final_path.name}")
                             
-                            # Cancel the official wait task since we got the file
-                            if not download_task.done():
-                                download_task.cancel()
-                            break
+                            # Verify the copy actually worked (not zero bytes)
+                            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                                try:
+                                    newest.unlink()
+                                except Exception:
+                                    pass  # Windows may lock the file - that's OK, it's already copied
+                                    
+                                downloaded_paths.append(final_path)
+                                recovered = True
+                                print(f"   Recovered downloaded file actively: {newest.name} -> guardado como {final_path.name}")
+                                
+                                # Cancel the official wait task since we got the file
+                                if not download_task.done():
+                                    download_task.cancel()
+                                break
+                            else:
+                                print(f"   Warning: copy of {newest.name} failed or resulted in empty file. Retrying...")
                 await asyncio.sleep(1)
 
             if recovered:
