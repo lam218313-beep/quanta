@@ -259,28 +259,79 @@ async def _search_individual(
             print(f"   Could not configure Recibido/Emitido and fill RUC: {e}")
 
         # 3. Tipo Comprobante (PrimeNG dropdown)
+        # Bug Fix 1 & 2: mapeo extendido de tipos + timeouts aumentados
         try:
             dropdown = frame.locator("p-dropdown[formcontrolname='tipoComprobanteI']")
-            await dropdown.click(timeout=2000)
+            await dropdown.click(timeout=5000)  # Bug 2: aumentado de 2000 a 5000ms
+
+            # Bug 2: esperar explícitamente a que el panel de opciones sea visible
+            try:
+                await frame.wait_for_selector(
+                    "p-dropdownitem li", state="visible", timeout=4000
+                )
+            except Exception:
+                pass
+
             await asyncio.sleep(0.5)
-            
+
             tipo_str = str(query.tipo).strip().zfill(2)
             serie_str = str(query.serie).strip().upper()
-            
-            exact_text = "Factura" # Default
-            if tipo_str == "01":
-                exact_text = "Factura"
-            elif tipo_str == "03":
-                exact_text = "Boleta de Venta"
-            elif tipo_str == "02":
-                exact_text = "Recibo por Honorarios"
-            elif tipo_str == "04":
-                exact_text = "Liquidación de compra"
-            elif tipo_str == "07":
+
+            # Bug 1: Catálogo completo de tipos de comprobante SUNAT (Catálogo N° 01)
+            TIPO_TEXT_MAP = {
+                "01": "Factura",
+                "02": "Recibo por Honorarios",
+                "03": "Boleta de Venta",
+                "04": "Liquidación de compra",
+                "05": "Boleto de compañía de aviación",
+                "06": "Carta de porte aéreo",
+                "07": "Nota de Crédito",   # se refina abajo según serie
+                "08": "Nota de Débito",    # se refina abajo según serie
+                "09": "Guía de remisión remitente",
+                "10": "Recibo por arrendamiento",
+                "11": "Póliza de adjudicación",
+                "12": "Ticket o cinta emitida por máquina registradora",
+                "13": "Documentos emitidos por bancos",
+                "14": "Recibo por servicios públicos",
+                "15": "Boletos emitidos por servicios de transporte",
+                "16": "Boletos emitidos por espectáculos públicos",
+                "17": "Documento de atribución",
+                "18": "Documentos emitidos por AFP",
+                "19": "Boleto o entrada por atracciones",
+                "20": "Comprobante de retención",
+                "21": "Conocimiento de embarque",
+                "22": "Comprobante por Operaciones No Habituales",
+                "23": "Póliza de seguro",
+                "24": "Certificado de renta",
+                "25": "Ticket de transporte ferroviario",
+                "26": "Recibo de gas natural",
+                "27": "Factura negociable",
+                "28": "Tarjeta de crédito",
+                "29": "Certificado de depósito",
+                "30": "Liquidación de compra",  # Bug 1: tipo 30 no estaba mapeado
+                "31": "Guía de remisión transportista",
+                "34": "Documento del operador",
+                "35": "Documento del partícipe",
+                "36": "Recibo de haber",
+                "37": "Documentos sustentatorios de operaciones de importación",
+                "40": "Comprobante de percepción",
+                "41": "Comprobante de retención electrónico",
+                "50": "Declaración Única de Aduanas (Importación definitiva)",
+                "52": "Despacho simplificado (Importación)",
+                "53": "Declaración de mensajería",
+                "56": "Declaración Única de Aduanas (Exportación definitiva)",
+                "87": "Nota de crédito especial",
+                "88": "Nota de débito especial",
+                "91": "Comprobante de no domiciliado",
+                "96": "Exceso de crédito fiscal por tasa adicional del IGV",
+                "97": "Nota de crédito - no domiciliado",
+                "98": "Nota de débito - no domiciliado",
+            }
+
+            # Refinar tipos 07 y 08 según la letra de la serie
+            if tipo_str == "07":
                 if serie_str.startswith("B"):
                     exact_text = "Boleta de Venta - Nota de Crédito"
-                elif serie_str.startswith("E"):
-                    exact_text = "Factura - Nota de Crédito" # Los E001 del portal SUNAT suelen ser para Facturas en SIRE Compras
                 else:
                     exact_text = "Factura - Nota de Crédito"
             elif tipo_str == "08":
@@ -288,21 +339,36 @@ async def _search_individual(
                     exact_text = "Boleta de Venta - Nota de Débito"
                 else:
                     exact_text = "Factura - Nota de Débito"
-            
-            # Use exact match pseudoclass :text-is() to avoid selecting "Factura - Nota de Crédito" when we just want "Factura"
-            item_loc = frame.locator(f"p-dropdownitem li:text-is('{exact_text}')")
-            
-            if await item_loc.count() > 0:
-                await item_loc.first.click(timeout=2000)
             else:
-                print(f"   Could not find exact dropdown option for {exact_text} (tipo {query.tipo})")
-                # Fallback to partial match just in case SUNAT changed the text slightly
-                fallback_loc = frame.locator(f"p-dropdownitem li:has-text('{exact_text}')")
-                if await fallback_loc.count() > 0:
-                    await fallback_loc.first.click(timeout=2000)
-                else:
-                    # Click outside to close dropdown
-                    await frame.evaluate("document.body.click()")
+                exact_text = TIPO_TEXT_MAP.get(tipo_str, "")
+
+            selected = False
+            if exact_text:
+                # Intento 1: coincidencia exacta
+                item_loc = frame.locator(f"p-dropdownitem li:text-is('{exact_text}')")
+                if await item_loc.count() > 0:
+                    await item_loc.first.click(timeout=4000)
+                    selected = True
+
+                if not selected:
+                    # Intento 2: coincidencia parcial
+                    fallback_loc = frame.locator(f"p-dropdownitem li:has-text('{exact_text}')")
+                    if await fallback_loc.count() > 0:
+                        await fallback_loc.first.click(timeout=4000)
+                        selected = True
+
+            if not selected:
+                # Intento 3 (Bug 1 fallback): buscar por el código numérico directamente en el texto
+                code_loc = frame.locator(f"p-dropdownitem li:has-text('{tipo_str}')")
+                if await code_loc.count() > 0:
+                    await code_loc.first.click(timeout=4000)
+                    selected = True
+                    print(f"   Tipo {tipo_str} seleccionado por código (fallback).")
+
+            if not selected:
+                print(f"   WARN: No se pudo seleccionar tipo {tipo_str} ('{exact_text}') en el dropdown. Continuando sin filtro de tipo.")
+                await frame.evaluate("document.body.click()")
+
         except Exception as e:
             print(f"   Could not select tipoComprobante: {e}")
 
@@ -732,7 +798,10 @@ async def run_batch(
 
                 safe_period = (q.period or "unknown").strip() or "unknown"
                 safe_book = (q.book or "cpe").strip() or "cpe"
-                base_name = f"{q.ruc_emisor}-{q.tipo}-{q.serie}-{q.numero}"
+                # Bug 3: cuando ruc_emisor está vacío (ej. boletas de venta propias),
+                # usar ruc_cliente como identificador para evitar nombre "--03-EB01-XXXX"
+                ruc_for_name = (q.ruc_emisor or "").strip() or (q.ruc_cliente or "").strip() or "SIN_RUC"
+                base_name = f"{ruc_for_name}-{q.tipo}-{q.serie}-{q.numero}"
                 
                 safe_ruc_cliente = q.ruc_cliente or "unknown_ruc"
                 safe_rs_cliente = _sanitize_folder_name(q.razon_social_cliente) if q.razon_social_cliente else "Empresa"
@@ -774,7 +843,8 @@ async def run_batch(
                     )
 
                     if saved:
-                        results.append(_result_dict(q, "ok", path=str(saved)))
+                        # Bug 4: pasar lista de paths guardados
+                        results.append(_result_dict(q, "ok", paths=[str(p) for p in saved]))
                         print(f"Saved: {saved}")
                     else:
                         results.append(_result_dict(q, "not_found"))
@@ -807,9 +877,10 @@ async def run_batch(
 def _result_dict(
     q: CpeQuery,
     status: str,
-    path: str = "",
+    paths: list = None,
     error: str = "",
 ) -> dict:
+    # Bug 4: normalizado a `paths` (lista) para consistencia con el orchestrator
     return {
         "status": status,
         "ruc_emisor": q.ruc_emisor,
@@ -818,7 +889,7 @@ def _result_dict(
         "numero": q.numero,
         "period": q.period,
         "book": q.book,
-        "path": path,
+        "paths": paths or [],
         "error": error,
     }
 

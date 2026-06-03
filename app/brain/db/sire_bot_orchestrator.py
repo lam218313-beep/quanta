@@ -132,11 +132,9 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
             
             update_data = {}
             if status in ("ok", "skipped"):
+                # Bug 4: _result_dict ahora retorna siempre `paths` (lista)
                 paths = res.get("paths", [])
-                # backwards compatibility with older returned dicts
-                if "path" in res and res["path"]:
-                    paths.append(res["path"])
-                
+
                 for ruta in paths:
                     ruta_lower = ruta.lower()
                     if ruta_lower.endswith(".pdf"):
@@ -146,8 +144,13 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                         update_data["estado_xml"] = "DESCARGADO"
                         update_data["ruta_xml"] = ruta
                     else:
-                        update_data["estado_xml"] = "DESCARGADO"
-                        update_data["ruta_xml"] = ruta
+                        # Extensión desconocida: inferir por la carpeta de destino
+                        if "/pdf/" in ruta.replace("\\", "/") or "\\pdf\\" in ruta:
+                            update_data["estado_pdf"] = "DESCARGADO"
+                            update_data["ruta_pdf"] = ruta
+                        else:
+                            update_data["estado_xml"] = "DESCARGADO"
+                            update_data["ruta_xml"] = ruta
 
             elif status == "not_found":
                 update_data["estado_xml"] = "NO_EXISTE"
