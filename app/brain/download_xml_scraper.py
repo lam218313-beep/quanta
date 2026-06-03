@@ -812,7 +812,17 @@ async def run_batch(
             await _dismiss_overlays(page)
 
             # Navigate to the Consulta de Comprobantes form
-            page, frame = await _navigate_to_consulta_cpe(page)
+            # AISLADO por cliente: si la sesión expiró, marcamos sus comprobantes
+            # como error y continuamos con el siguiente cliente sin matar el batch.
+            try:
+                page, frame = await _navigate_to_consulta_cpe(page)
+            except Exception as nav_err:
+                print(f"   [SESION EXPIRADA/ERROR] Cliente {ruc_cliente}: {nav_err}")
+                print(f"   Ejecuta: python app/brain/automation_scraper.py --ruc {ruc_cliente}")
+                for q in client_queries:
+                    results.append(_result_dict(q, "error", error=f"session_expired: {nav_err}"))
+                await context.close()
+                continue
 
             # Dump the frame HTML for debug (first time only)
             try:
@@ -871,9 +881,8 @@ async def run_batch(
                     pdf_path = out_dir / "pdf" / f"{base_name}.pdf"
                     
                     if xml_path.exists() or zip_path.exists() or pdf_path.exists():
-                        # We will prioritize returning the XML path if it exists
                         existing_path = xml_path if xml_path.exists() else (zip_path if zip_path.exists() else pdf_path)
-                        results.append(_result_dict(q, "skipped", path=str(existing_path)))
+                        results.append(_result_dict(q, "skipped", paths=[str(existing_path)]))
                         continue
 
                 try:
