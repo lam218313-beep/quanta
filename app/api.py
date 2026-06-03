@@ -182,11 +182,13 @@ async def trigger_enrich_xml(req: BotRequest, background_tasks: BackgroundTasks)
         return {"status": "already_running", "message": "XML Enricher is already running.", "task_id": task_id}
         
     cmd = [sys.executable, "app/brain/db/sire_xml_enricher.py", "--limit", "500", "--ruc", req.ruc]
+    if req.periodo:
+        cmd += ["--periodo", req.periodo]
     root_dir = Path(__file__).parent.parent
     
     running_tasks[task_id] = True
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
-    return {"status": "started", "message": f"Started XML Extraction bot for {req.ruc}", "task_id": task_id}
+    return {"status": "started", "message": f"Started XML Extraction bot for {req.ruc} - {req.periodo or 'todos los periodos'}", "task_id": task_id}
 
 @app.post("/api/bot/classify-ai")
 async def trigger_classify_ai(req: BotRequest, background_tasks: BackgroundTasks):
