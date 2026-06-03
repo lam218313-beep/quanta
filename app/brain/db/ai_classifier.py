@@ -181,6 +181,8 @@ def main() -> int:
         default="all",
         help="Libro a clasificar",
     )
+    parser.add_argument("--ruc", type=str, help="RUC de la empresa para filtrar")
+    parser.add_argument("--periodo", type=str, help="Periodo a enriquecer (ej: 202604)")
     args = parser.parse_args()
 
     _ensure_import_path()
@@ -212,13 +214,28 @@ def main() -> int:
 
         print(f"\n=== Procesando {tipo_libro} ===")
 
+        # Resolve cliente_id from RUC if provided
+        cliente_id_filter = None
+        if args.ruc:
+            r_client = supabase.table("clientes").select("id").eq("ruc", args.ruc).execute()
+            if not r_client.data:
+                print(f"Error: No se encontró cliente con RUC {args.ruc}")
+                return 1
+            cliente_id_filter = r_client.data[0]["id"]
+            
         # Buscar registros sin cuenta_contable asignada que tengan descripcion_comprobante
-        resp = supabase.table(tabla) \
+        query = supabase.table(tabla) \
             .select("id, cliente_id, descripcion_comprobante") \
             .is_("cuenta_contable", "null") \
-            .not_.is_("descripcion_comprobante", "null") \
-            .limit(args.limit) \
-            .execute()
+            .not_.is_("descripcion_comprobante", "null")
+            
+        if cliente_id_filter:
+            query = query.eq("cliente_id", cliente_id_filter)
+            
+        if args.periodo:
+            query = query.eq("periodo", args.periodo)
+            
+        resp = query.limit(args.limit).execute()
 
         registros = [r for r in resp.data if r.get("descripcion_comprobante", "").strip()]
         print(f"  Registros pendientes de clasificar: {len(registros)}")

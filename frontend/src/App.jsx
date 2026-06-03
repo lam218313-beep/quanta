@@ -124,17 +124,18 @@ function App() {
     setLoading(true)
     setItemsToShow(50) // Reset items
     try {
+      const c_id = selectedCliente;
       if (selectedPhase === 'preliminar' || selectedPhase === 'enriquecimiento1' || selectedPhase === 'enriquecimiento2') {
         const { data: ventas } = await supabase
           .from('sire_preliminar_ventas')
-          .select('*')
-          .eq('cliente_id', selectedCliente)
+          .select('id, cliente_id, serie_cdp, nro_cp, fecha_emision, razon_social, total_cp, igv_ipm, bi_gravada, estado_enriquecimiento, cuenta_contable, descripcion_cuenta, categoria, descripcion_comprobante')
+          .eq('cliente_id', c_id)
           .eq('periodo', selectedPeriodo)
           
         const { data: compras } = await supabase
           .from('sire_preliminar_compras')
-          .select('*')
-          .eq('cliente_id', selectedCliente)
+          .select('id, cliente_id, serie_cdp, nro_cp, fecha_emision, razon_social, total_cp, igv_ipm_dg, bi_gravado_dg, detraccion, estado_enriquecimiento, cuenta_contable, descripcion_cuenta, categoria, descripcion_comprobante')
+          .eq('cliente_id', c_id)
           .eq('periodo', selectedPeriodo)
 
         const allE = [...(ventas || []).map(v => ({...v, tipo: 'VENTA'})), ...(compras || []).map(c => ({...c, tipo: 'COMPRA'}))]
@@ -543,9 +544,11 @@ function App() {
                       
                       {selectedPhase === 'enriquecimiento2' && (
                         <>
-                          <th>Cuenta PCGE</th>
-                          <th>Categoría IA</th>
-                          <th>Descripción</th>
+                          <th style={{width: '25%'}}>Glosa Extraída</th>
+                          <th style={{width: '10%'}}>Base Imp.</th>
+                          <th style={{width: '10%'}}>IGV</th>
+                          <th style={{width: '15%'}}>Categoría</th>
+                          <th style={{width: '15%'}}>Cuenta Contable</th>
                         </>
                       )}
                       
@@ -587,14 +590,27 @@ function App() {
 
                         {selectedPhase === 'enriquecimiento2' && (
                           <>
+                            <td className="truncate-cell" title={row.descripcion_comprobante}>
+                              <div style={{fontSize: '0.85rem', color: 'var(--text-color)', opacity: 0.9}}>
+                                {row.descripcion_comprobante || 'Sin descripción'}
+                              </div>
+                            </td>
+                            <td>S/ {Number(row.bi_gravado_dg || row.bi_gravada || 0).toFixed(2)}</td>
+                            <td>S/ {Number(row.igv_ipm_dg || row.igv_ipm || 0).toFixed(2)}</td>
                             <td>
-                              <span className={`status-badge ${row.cuenta_contable ? 'status-success' : 'status-pending'}`} style={row.cuenta_contable ? {background: 'rgba(139, 92, 246, 0.2)', color: '#a78bfa'} : {}}>
-                                {row.cuenta_contable || 'Pendiente'}
+                              <span className={`status-badge ${row.categoria ? 'status-success' : 'status-pending'}`} style={row.categoria ? {background: 'rgba(139, 92, 246, 0.2)', color: '#a78bfa'} : {}}>
+                                {row.categoria || 'Pendiente'}
                               </span>
                             </td>
-                            <td>{row.categoria || '-'}</td>
-                            <td style={{maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}} title={row.descripcion_cuenta}>
-                              {row.descripcion_cuenta || '-'}
+                            <td>
+                              {row.cuenta_contable ? (
+                                <div style={{display: 'flex', flexDirection: 'column', gap: '0.2rem'}}>
+                                  <span style={{fontWeight: '600', color: '#a78bfa'}}>{row.cuenta_contable}</span>
+                                  <span style={{fontSize: '0.75rem', opacity: 0.8}} title={row.descripcion_cuenta}>{row.descripcion_cuenta}</span>
+                                </div>
+                              ) : (
+                                <span className="status-badge status-pending">Pendiente</span>
+                              )}
                             </td>
                           </>
                         )}
