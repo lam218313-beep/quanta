@@ -10,7 +10,7 @@ if str(root) not in sys.path:
 from app.brain.db.supabase_client import get_supabase
 from app.brain.sire_xml_matcher import _extract_from_xml
 
-def enrich_preliminary_data(limit: int = 500, ruc: str = None):
+def enrich_preliminary_data(limit: int = 500, ruc: str = None, periodo: str = None):
     """
     Busca comprobantes físicos que ya tienen su XML descargado (estado_xml = 'DESCARGADO')
     pero que aún no han enriquecido la tabla preliminar. Extrae la glosa y detracción del XML
@@ -19,6 +19,19 @@ def enrich_preliminary_data(limit: int = 500, ruc: str = None):
     supabase = get_supabase()
     
     print(f"Buscando XMLs descargados para enriquecer (límite {limit})...")
+    if ruc:
+        print(f"  Filtro RUC: {ruc}")
+    if periodo:
+        print(f"  Filtro Periodo: {periodo}")
+    
+    # Resolve cliente_id from RUC (same reliable pattern as orchestrator)
+    cliente_id = None
+    if ruc:
+        r = supabase.table("clientes").select("id").eq("ruc", ruc).execute()
+        if not r.data:
+            print(f"Error: No se encontró cliente con RUC {ruc}")
+            return
+        cliente_id = r.data[0]["id"]
     
     query = supabase.table("sire_comprobantes_fisicos") \
         .select(
@@ -30,8 +43,11 @@ def enrich_preliminary_data(limit: int = 500, ruc: str = None):
         .eq("estado_xml", "DESCARGADO") \
         .not_.is_("ruta_xml", "null")
         
-    if ruc:
-        query = query.eq("clientes.ruc", ruc)
+    if cliente_id:
+        query = query.eq("cliente_id", cliente_id)
+    
+    if periodo:
+        query = query.eq("periodo", periodo)
         
     response = query.limit(limit).execute()
         
@@ -111,6 +127,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--ruc", type=str, help="RUC de la empresa para filtrar")
+    parser.add_argument("--periodo", type=str, help="Periodo a enriquecer (ej: 202604)")
     args = parser.parse_args()
     
-    enrich_preliminary_data(limit=args.limit, ruc=args.ruc)
+    enrich_preliminary_data(limit=args.limit, ruc=args.ruc, periodo=args.periodo)
