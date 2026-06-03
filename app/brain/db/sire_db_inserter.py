@@ -5,6 +5,26 @@ try:
 except ModuleNotFoundError:
     from brain.db.supabase_client import get_supabase
 
+
+# Prefijos de serie que corresponden a comprobantes electrónicos con XML en SUNAT
+_ELECTRONIC_PREFIXES = (
+    "F", "B", "E", "EC", "BE", "BD", "FD", "RH", "ER", "FF", "BB", "D",
+)
+
+def _is_electronic_serie(serie: str) -> bool:
+    """Retorna True si la serie tiene un prefijo de comprobante electrónico.
+    Las series sin prefijo (ej. FA01, FQ00, 0001) son documentos físicos
+    que usualmente no tienen XML en el portal de SUNAT.
+    """
+    s = serie.strip().upper()
+    # Debe empezar con letra del grupo electrónico Y luego dígitos
+    for prefix in sorted(_ELECTRONIC_PREFIXES, key=len, reverse=True):
+        if s.startswith(prefix):
+            resto = s[len(prefix):]
+            if resto.isdigit():  # ej. F001, E001, BE01
+                return True
+    return False
+
 def parse_and_insert_sire_txt(client_id: str, periodo: str, book_type: str, txt_path: Path):
     """
     Lee el archivo TXT descargado de SIRE y lo inserta en la base de datos (Bulk Insert).
@@ -68,17 +88,23 @@ def parse_and_insert_sire_txt(client_id: str, periodo: str, book_type: str, txt_
     fisicos_records = []
     
     for p in inserted_preliminaries:
+        serie = p.get("serie_cdp", "") or ""
+        es_electronico = _is_electronic_serie(serie)
+
         # Preparamos el registro para sire_comprobantes_fisicos
         r = {
             "cliente_id": client_id,
             "periodo": periodo,
             "tipo_libro": tipo_libro,
-            "ruc_tercero": p["nro_doc_identidad"] if is_compras else p["nro_doc_identidad"], # ventas usa el mismo campo en nuestro map
+            "ruc_tercero": p["nro_doc_identidad"] if is_compras else p["nro_doc_identidad"],
             "tipo_cp": p["tipo_cp_doc"],
-            "serie": p["serie_cdp"],
+            "serie": serie,
             "numero": p["nro_cp"],
             "estado_xml": "PENDIENTE",
             "estado_pdf": "PENDIENTE",
+            # Parte B: documentos físicos arrancan con reintentos=9 → solo 1 intento
+            # antes de alcanzar el límite de 10 y no volver a entrar en cola.
+            "reintentos": 0 if es_electronico else 9,
         }
         
         if is_compras:

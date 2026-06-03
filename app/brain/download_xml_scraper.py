@@ -33,6 +33,50 @@ CONSULTA_CPE_CODE = "11.38.1.1.1"
 DownloadPrefer = Literal["xml", "pdf", "either"]
 
 
+# ---------------------------------------------------------------------------
+# Serie-prefix → tipo inference
+# ---------------------------------------------------------------------------
+
+# En el sistema electrónico de SUNAT, el prefijo de la serie define inequívocamente
+# el tipo de comprobante. Cuando el tipo del SIRE TXT no coincide con el prefijo de
+# la serie, usamos el prefijo como fuente de verdad.
+_SERIE_PREFIX_TO_TIPO: list[tuple[str, str]] = [
+    # (prefijo_upper, tipo_sunat)
+    # --- Notas de Crédito electrónicas ---
+    ("EC",  "07"),  # Nota Crédito para documentos especiales
+    ("BE",  "07"),  # Nota Crédito sobre Boleta
+    ("E",   "07"),  # Nota Crédito sobre Factura (E001, E002...)
+    # --- Notas de Débito electrónicas ---
+    ("BD",  "08"),  # Nota Débito sobre Boleta
+    ("FD",  "08"),  # Nota Débito sobre Factura
+    ("D",   "08"),  # Nota Débito genérica
+    # --- Recibos por Honorarios ---
+    ("RH",  "02"),
+    ("ER",  "02"),  # e-RxH
+    # --- Boletas electrónicas ---
+    ("BB",  "03"),
+    ("B",   "03"),  # B001, B002...
+    # --- Facturas electrónicas ---
+    ("FF",  "01"),
+    ("F",   "01"),  # F001, F002...
+]
+
+
+def _infer_tipo_from_serie(serie: str, tipo_original: str) -> str:
+    """Si el prefijo de la serie define un tipo diferente al registrado en SIRE,
+    retorna el tipo correcto para el portal SUNAT. De lo contrario, retorna el original."""
+    serie_upper = serie.strip().upper()
+    for prefix, tipo_inferred in _SERIE_PREFIX_TO_TIPO:
+        if serie_upper.startswith(prefix):
+            if tipo_inferred != tipo_original:
+                print(
+                    f"   [tipo-fix] Serie '{serie}' → tipo inferido '{tipo_inferred}' "
+                    f"(SIRE dijo '{tipo_original}')"
+                )
+            return tipo_inferred
+    return tipo_original  # serie sin prefijo electrónico conocido
+
+
 @dataclass(frozen=True)
 class CpeQuery:
     """A single CPE to look up / download."""
@@ -277,6 +321,8 @@ async def _search_individual(
             tipo_str = str(query.tipo).strip().zfill(2)
             serie_str = str(query.serie).strip().upper()
 
+            # Parte A: corregir tipo usando el prefijo de la serie cuando SIRE y portal discrepan
+            tipo_str = _infer_tipo_from_serie(query.serie, tipo_str).zfill(2)
             # Bug 1: Catálogo completo de tipos de comprobante SUNAT (Catálogo N° 01)
             TIPO_TEXT_MAP = {
                 "01": "Factura",
