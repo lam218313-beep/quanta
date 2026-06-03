@@ -55,25 +55,25 @@ def reset_no_existe(ruc: str = None, periodo: str = None, dry_run: bool = False)
         print("No hay registros NO_EXISTE para evaluar.")
         return
 
-    electrónicos = [r for r in records if _is_electronic_serie(r.get("serie", ""))]
-    físicos      = [r for r in records if not _is_electronic_serie(r.get("serie", ""))]
+    electronicos = [r for r in records if _is_electronic_serie(r.get("serie", ""))]
+    fisicos      = [r for r in records if not _is_electronic_serie(r.get("serie", ""))]
 
     print(f"\nTotal NO_EXISTE encontrados : {len(records)}")
-    print(f"  → Con serie electrónica   : {len(electrónicos)}  (se resetearán a PENDIENTE)")
-    print(f"  → Con serie física/otra   : {len(físicos)}  (se dejan como NO_EXISTE)")
+    print(f"  -> Con serie electronica   : {len(electronicos)}  (se resetean a PENDIENTE)")
+    print(f"  -> Con serie fisica/otra   : {len(fisicos)}  (se dejan como NO_EXISTE)")
 
-    if not electrónicos:
+    if not electronicos:
         print("\nNada que resetear.")
         return
 
     if dry_run:
         print("\n[DRY RUN] Ejemplos a resetear:")
-        for r in electrónicos[:20]:
+        for r in electronicos[:20]:
             print(f"  id={r['id']} | serie={r['serie']} | tipo={r['tipo_cp']} | {r['tipo_libro']}")
         return
 
     # Resetear en lotes de 500
-    ids_to_reset = [r["id"] for r in electrónicos]
+    ids_to_reset = [r["id"] for r in electronicos]
     batch_size = 500
     reseteados = 0
 
@@ -88,7 +88,7 @@ def reset_no_existe(ruc: str = None, periodo: str = None, dry_run: bool = False)
         reseteados += len(batch)
         print(f"  Reseteados: {reseteados}/{len(ids_to_reset)}")
 
-    print(f"\n✅ Reset completado: {reseteados} registros vuelven a PENDIENTE.")
+    print(f"\n[OK] Reset completado: {reseteados} registros vuelven a PENDIENTE.")
     print("Ahora ejecuta el orchestrator para reintentar las descargas.")
 
 
