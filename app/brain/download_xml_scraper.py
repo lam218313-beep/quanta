@@ -280,23 +280,46 @@ async def _search_individual(
     """
     print(f"Query: {base_name}")
 
-    # Check if we are in the new Angular form by looking for 'rucEmisor' formcontrolname
-    is_angular = await frame.locator("input[formcontrolname='rucEmisor']").count() > 0
+    # Detectar variante del formulario:
+    # - Angular puro: input con formcontrolname='rucEmisor' + p-dropdown
+    # - Hibrido: input con name='rucEmisor' (sin formcontrolname) + radioBoton id='emitido'
+    # - Legacy: campos numRuc, codComp, numeroSerie
+    is_angular  = await frame.locator("input[formcontrolname='rucEmisor']").count() > 0
+    is_hybrid   = (
+        not is_angular
+        and await frame.locator("[name='rucEmisor']").count() > 0
+        and await frame.locator("#emitido, #recibido").count() > 0
+    )
 
-    if is_angular:
+    if is_angular or is_hybrid:
         try:
             if query.book == "sales":
-                await frame.locator("#emitido").check(force=True)
-                await asyncio.sleep(0.5)
+                # Check emitido - capturar si ya estaba checked sin lanzar error
                 try:
-                    await frame.locator("input[formcontrolname='rucReceptor']").fill(query.ruc_emisor, timeout=2000)
+                    await frame.locator("#emitido").check(force=True)
+                except Exception:
+                    pass  # ya estaba seleccionado
+                await asyncio.sleep(0.5)
+                ruc_field = (
+                    "input[formcontrolname='rucReceptor']" if is_angular
+                    else "[name='rucEmisor']"
+                )
+                try:
+                    await frame.locator(ruc_field).fill(query.ruc_emisor, timeout=2000)
                 except Exception:
                     pass
             else:
-                await frame.locator("#recibido").check(force=True)
-                await asyncio.sleep(0.5)
                 try:
-                    await frame.locator("input[formcontrolname='rucEmisor']").fill(query.ruc_emisor, timeout=2000)
+                    await frame.locator("#recibido").check(force=True)
+                except Exception:
+                    pass  # ya estaba seleccionado
+                await asyncio.sleep(0.5)
+                ruc_field = (
+                    "input[formcontrolname='rucEmisor']" if is_angular
+                    else "[name='rucEmisor']"
+                )
+                try:
+                    await frame.locator(ruc_field).fill(query.ruc_emisor, timeout=2000)
                 except Exception:
                     pass
         except Exception as e:
@@ -420,34 +443,28 @@ async def _search_individual(
 
         # 4. Serie & Numero
         try:
-            await frame.locator("input[formcontrolname='serieComprobante']").fill(query.serie, timeout=2000)
-            await frame.locator("input[formcontrolname='numeroComprobante']").fill(query.numero, timeout=2000)
+            serie_field = (
+                "input[formcontrolname='serieComprobante']" if is_angular
+                else "[name='serieComprobante']"
+            )
+            numero_field = (
+                "input[formcontrolname='numeroComprobante']" if is_angular
+                else "[name='numeroComprobante']"
+            )
+            await frame.locator(serie_field).fill(query.serie, timeout=2000)
+            await frame.locator(numero_field).fill(query.numero, timeout=2000)
         except Exception as e:
             print(f"   Could not fill serie/numero: {e}")
-            
-    else:
-        # Legacy form filling
-        field_map = {
-            "numRuc": query.ruc_emisor,
-            "codComp": query.tipo,
-            "numeroSerie": query.serie,
-            "numero": query.numero,
-            "fechaEmision": query.fecha,
-            "monto": query.importe,
-        }
 
-        for name, value in field_map.items():
-            try:
-                loc = frame.locator(f"[name='{name}']")
-                if await loc.count() > 0:
-                    tag = await loc.first.evaluate("el => el.tagName.toLowerCase()")
-                    if tag == "select":
-                        await loc.first.select_option(value=value)
-                    else:
-                        await loc.first.fill(value)
-                    await asyncio.sleep(0.2)
-            except Exception as e:
-                print(f"   Could not fill {name}: {e}")
+    elif is_hybrid:
+        # Formulario hibrido: ya se llenaron RUC/radio arriba;
+        # el dropdown de tipo NO existe (no es PrimeNG), llenar por name
+        try:
+            await frame.locator("[name='serieComprobante']").fill(query.serie, timeout=2000)
+            await frame.locator("[name='numeroComprobante']").fill(query.numero, timeout=2000)
+        except Exception as e:
+            print(f"   Could not fill serie/numero (hybrid): {e}")
+
 
     # Click the Consultar button
     for sel in [
@@ -563,8 +580,7 @@ async def _search_individual(
                 continue
 
     if not targets:
-        print(f"   Comprobante found but NO download button available")
-        # Save the result as a "validation only" record
+        print(f"   Comprobante found but NO download button (no_descargable): {base_name}")
         if debug_dir:
             debug_dir.mkdir(parents=True, exist_ok=True)
             try:
@@ -573,8 +589,7 @@ async def _search_individual(
                 (debug_dir / f"no_download-{base_name}.html").write_text(html, encoding="utf-8")
             except Exception:
                 pass
-                
-        # Close modal for next query
+        # Cerrar modal
         try:
             close_btns = frame.locator("button.close, button.close-without-header, button[aria-label='Close']")
             count = await close_btns.count()
@@ -583,7 +598,10 @@ async def _search_individual(
                 await asyncio.sleep(0.3)
         except Exception:
             pass
-        return []
+        # Fix B: retornar sentinel especial para que el orchestrator sepa que el doc
+        # existe en SUNAT pero no tiene archivo descargable (no confundir con NO_EXISTE)
+        return [Path("__NO_DESCARGABLE__")]
+
 
     # Download the files
     downloaded_paths = []

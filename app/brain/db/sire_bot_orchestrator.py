@@ -132,10 +132,13 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
             
             update_data = {}
             if status in ("ok", "skipped"):
-                # Bug 4: _result_dict ahora retorna siempre `paths` (lista)
                 paths = res.get("paths", [])
-
                 for ruta in paths:
+                    # Fix B: filtrar el sentinel de no-descargable
+                    if "__NO_DESCARGABLE__" in ruta:
+                        update_data["estado_xml"] = "NO_DESCARGABLE"
+                        update_data["estado_pdf"] = "NO_DESCARGABLE"
+                        break
                     ruta_lower = ruta.lower()
                     if ruta_lower.endswith(".pdf"):
                         update_data["estado_pdf"] = "DESCARGADO"
@@ -144,7 +147,6 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                         update_data["estado_xml"] = "DESCARGADO"
                         update_data["ruta_xml"] = ruta
                     else:
-                        # Extensión desconocida: inferir por la carpeta de destino
                         if "/pdf/" in ruta.replace("\\", "/") or "\\pdf\\" in ruta:
                             update_data["estado_pdf"] = "DESCARGADO"
                             update_data["ruta_pdf"] = ruta
@@ -153,6 +155,7 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                             update_data["ruta_xml"] = ruta
 
             elif status == "not_found":
+                # El comprobante no aparece en SUNAT en absoluto
                 update_data["estado_xml"] = "NO_EXISTE"
             else:
                 update_data["estado_xml"] = "ERROR"
@@ -163,7 +166,7 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                 .eq("id", db_record["id"]) \
                 .execute()
                 
-        print("Base de datos de comprobantes físicos actualizada.")
+        print("Base de datos de comprobantes fisicos actualizada.")
         
     except Exception as e:
         print(f"Error catastrófico en la orquestación: {e}")

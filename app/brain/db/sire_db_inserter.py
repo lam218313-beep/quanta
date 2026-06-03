@@ -17,11 +17,18 @@ def _is_electronic_serie(serie: str) -> bool:
     que usualmente no tienen XML en el portal de SUNAT.
     """
     s = serie.strip().upper()
-    # Debe empezar con letra del grupo electrónico Y luego dígitos
+    if not s:
+        return False
+
+    # Prefijo electrónico seguido de dígitos puros: F001, E001, BE01, etc.
     for prefix in sorted(_ELECTRONIC_PREFIXES, key=len, reverse=True):
         if s.startswith(prefix):
             resto = s[len(prefix):]
-            if resto.isdigit():  # ej. F001, E001, BE01
+            if resto.isdigit():          # F001, B001, E001, BE01
+                return True
+            # Fix C: operadoras grandes (Movistar, Claro, etc.) usan series
+            # alfanuméricas como F3M5, F101, FA1A que SÍ son electrónicas
+            if resto and resto[0].isdigit():  # empieza con dígito tras prefijo → electrónica
                 return True
     return False
 
