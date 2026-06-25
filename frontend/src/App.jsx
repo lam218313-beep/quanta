@@ -1,13 +1,12 @@
 import { useEffect, useState, useRef } from 'react'
-import { Activity, Database, CheckCircle, RefreshCcw, Search, BarChart3, UploadCloud, Terminal, Download } from 'lucide-react'
+import { Activity, Database, CheckCircle, RefreshCcw, Search, BarChart3, UploadCloud, Terminal, Download, Edit2, X, Upload, ChevronRight, ChevronDown, ChevronUp, UserPlus, Settings } from 'lucide-react'
 import { supabase } from './supabaseClient'
 import './App.css'
 
-const PHASES = [
-  { id: 'preliminar', label: 'Preliminar Simple', icon: Database },
-  { id: 'descargados', label: 'Comprobantes Descargados', icon: CheckCircle },
-  { id: 'enriquecimiento1', label: 'Enriquecimiento 1 (XML)', icon: Search },
-  { id: 'enriquecimiento2', label: 'Enriquecimiento 2 (Contable)', icon: BarChart3 }
+const STEPS = [
+  { id: 1, title: 'Sincronización SIRE', icon: Database, phaseFilter: 'descargados' },
+  { id: 2, title: 'Procesamiento IA', icon: BarChart3, phaseFilter: 'enriquecimiento2' },
+  { id: 3, title: 'Cierre y Exportación', icon: CheckCircle, phaseFilter: 'preliminar' }
 ]
 
 const generatePeriods = () => {
@@ -36,21 +35,33 @@ function App() {
   const [clientes, setClientes] = useState([])
   const [selectedCliente, setSelectedCliente] = useState('')
   const [selectedPeriodo, setSelectedPeriodo] = useState('')
-  const [selectedPhase, setSelectedPhase] = useState('preliminar')
+  const [activeStep, setActiveStep] = useState(1)
   
   const [loading, setLoading] = useState(false)
-  const [stats, setStats] = useState({ totalVentas: 0, totalCompras: 0, validos: 0, pendientes: 0 })
   const [data, setData] = useState([])
-  const [notification, setNotification] = useState('')
+  const [notifications, setNotifications] = useState([])
+  const [clientSearchText, setClientSearchText] = useState('')
+  const [showAddClientModal, setShowAddClientModal] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [editingClient, setEditingClient] = useState(null)
-  
+  const [newClient, setNewClient] = useState({ ruc: '', razon_social: '', usuario_sol: '', clave_sol: '', rubro: '', cuentas_contables: '' })
+
   // Terminal state
   const [activeTaskId, setActiveTaskId] = useState('')
   const [terminalLogs, setTerminalLogs] = useState('')
+  const [isTerminalMinimized, setIsTerminalMinimized] = useState(false)
   const terminalRef = useRef(null)
 
-  // Simple Pagination state
+  // Simple Pagination
   const [itemsToShow, setItemsToShow] = useState(50)
+
+  const addToast = (msg, type = 'info') => {
+    const id = Date.now()
+    setNotifications(prev => [...prev, { id, msg, type }])
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id))
+    }, 5000)
+  }
 
   useEffect(() => {
     async function loadContext() {
@@ -64,8 +75,10 @@ function App() {
     if (selectedCliente) {
       const client = clientes.find(c => c.id === selectedCliente)
       setEditingClient(client ? { ...client } : null)
+      if (client) setClientSearchText(`${client.ruc} - ${client.razon_social}`)
     } else {
       setEditingClient(null)
+      setClientSearchText('')
     }
   }, [selectedCliente, clientes])
 
@@ -75,101 +88,33 @@ function App() {
     }
   }, [terminalLogs])
 
-  useEffect(() => {
-    let interval = null;
-    if (activeTaskId) {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE_URL}/api/bot/logs/${activeTaskId}`)
-          if (res.ok) {
-            const data = await res.json()
-            setTerminalLogs(data.logs)
-            if (!data.is_running && data.logs !== "No logs available yet...") {
-              setTimeout(() => setActiveTaskId(''), 2000)
-            }
-          }
-        } catch(e) {
-          console.error("Error fetching logs", e)
-        }
-      }, 1000)
-    }
-    return () => { if (interval) clearInterval(interval) }
-  }, [activeTaskId])
-
-  const handleSaveClient = async () => {
-    if (!editingClient) return
-    setNotification('Guardando credenciales...')
-    
-    const { error } = await supabase
-      .from('clientes')
-      .update({
-        usuario_sol: editingClient.usuario_sol,
-        clave_sol: editingClient.clave_sol,
-        client_id_api: editingClient.client_id_api,
-        client_secret_api: editingClient.client_secret_api
-      })
-      .eq('id', editingClient.id)
-
-    if (error) {
-      setNotification(`❌ Error al guardar: ${error.message}`)
-    } else {
-      setNotification('✅ Credenciales guardadas correctamente')
-      setClientes(clientes.map(c => c.id === editingClient.id ? editingClient : c))
-    }
-    setTimeout(() => setNotification(''), 3000)
-  }
-
   const fetchTableData = async () => {
     if (!selectedCliente || !selectedPeriodo) return;
     setLoading(true)
-    setItemsToShow(50) // Reset items
+    setItemsToShow(50)
     try {
       const c_id = selectedCliente;
-      if (selectedPhase === 'preliminar' || selectedPhase === 'enriquecimiento1' || selectedPhase === 'enriquecimiento2') {
+      const stepConfig = STEPS.find(s => s.id === activeStep)
+      const selectedPhase = stepConfig.phaseFilter
+
+      if (selectedPhase === 'preliminar' || selectedPhase === 'enriquecimiento2') {
         const { data: ventas } = await supabase
           .from('sire_preliminar_ventas')
-          .select('id, cliente_id, serie_cdp, nro_cp, fecha_emision, razon_social, total_cp, igv_ipm, bi_gravada, estado_enriquecimiento, cuenta_contable, descripcion_cuenta, categoria, descripcion_comprobante')
+          .select('*')
           .eq('cliente_id', c_id)
           .eq('periodo', selectedPeriodo)
           
         const { data: compras } = await supabase
           .from('sire_preliminar_compras')
-          .select('id, cliente_id, serie_cdp, nro_cp, fecha_emision, razon_social, total_cp, igv_ipm_dg, bi_gravado_dg, detraccion, estado_enriquecimiento, cuenta_contable, descripcion_cuenta, categoria, descripcion_comprobante')
+          .select('*')
           .eq('cliente_id', c_id)
           .eq('periodo', selectedPeriodo)
 
         const allE = [...(ventas || []).map(v => ({...v, tipo: 'VENTA'})), ...(compras || []).map(c => ({...c, tipo: 'COMPRA'}))]
 
         if (selectedPhase === 'preliminar') {
-          setStats({
-            totalVentas: ventas?.length || 0,
-            totalCompras: compras?.length || 0,
-            validos: allE.length,
-            pendientes: 0
-          })
-          setData(allE)
-        } else if (selectedPhase === 'enriquecimiento1') {
-          const complete = allE.filter(x => x.estado_enriquecimiento === 'COMPLETO')
-          const error = allE.filter(x => x.estado_enriquecimiento === 'ERROR')
-          const pending = allE.filter(x => !x.estado_enriquecimiento)
-
-          setStats({
-            totalVentas: ventas?.length || 0,
-            totalCompras: compras?.length || 0,
-            validos: complete.length,
-            pendientes: pending.length + error.length
-          })
           setData(allE)
         } else if (selectedPhase === 'enriquecimiento2') {
-          const classified = allE.filter(x => x.cuenta_contable)
-          const unclassified = allE.filter(x => !x.cuenta_contable && x.estado_enriquecimiento === 'COMPLETO')
-
-          setStats({
-            totalVentas: ventas?.length || 0,
-            totalCompras: compras?.length || 0,
-            validos: classified.length,
-            pendientes: unclassified.length
-          })
           setData(allE.filter(x => x.estado_enriquecimiento === 'COMPLETO'))
         }
         
@@ -180,19 +125,25 @@ function App() {
           .eq('cliente_id', selectedCliente)
           .eq('periodo', selectedPeriodo)
           
-        const downloaded = fisicos?.filter(f => f.estado_xml === 'DESCARGADO') || []
-        const pending = fisicos?.filter(f => f.estado_xml === 'PENDIENTE') || []
-        const sales = fisicos?.filter(f => f.tipo_libro === 'VENTAS') || []
-        const purchases = fisicos?.filter(f => f.tipo_libro === 'COMPRAS') || []
-
-        setStats({
-          totalVentas: sales.length,
-          totalCompras: purchases.length,
-          validos: downloaded.length,
-          pendientes: pending.length
-        })
+        let localFiles = []
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/bot/local-files`)
+          if (res.ok) {
+            const json = await res.json()
+            localFiles = json.files || []
+          }
+        } catch(e) {}
         
-        setData(fisicos || [])
+        const enrichedFisicos = (fisicos || []).map(f => {
+          const rucTercero = f.ruc_tercero || ''
+          const tipoCp = f.tipo_cp || ''
+          const baseName = `${rucTercero}-${tipoCp}-${f.serie || ''}-${f.numero || ''}`
+          
+          if (localFiles.includes(`${baseName}.xml`) || localFiles.includes(`${baseName}.zip`)) f.estado_xml = 'DESCARGADO'
+          if (localFiles.includes(`${baseName}.pdf`)) f.estado_pdf = 'DESCARGADO'
+          return f
+        })
+        setData(enrichedFisicos)
       }
     } catch (err) {
       console.error(err)
@@ -203,73 +154,181 @@ function App() {
 
   useEffect(() => {
     fetchTableData()
-  }, [selectedCliente, selectedPeriodo, selectedPhase])
+  }, [selectedCliente, selectedPeriodo, activeStep])
 
-  const handleResetBots = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/bot/reset`, { method: 'POST' })
-      const result = await response.json()
-      setNotification(`🔄 ${result.message}`)
-      setActiveTaskId(null)
-      setTerminalLogs('')
-      setTimeout(() => setNotification(''), 4000)
-    } catch (e) {
-      setNotification('❌ Error conectando con el servidor')
+  useEffect(() => {
+    let interval = null;
+    if (activeTaskId) {
+      interval = setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/bot/logs/${activeTaskId}`)
+          if (res.ok) {
+            const data = await res.json()
+            setTerminalLogs(data.logs)
+            if (data.is_running === false && data.logs !== "No logs available yet...") {
+              fetchTableData(); // Refresh immediately
+              setTimeout(() => {
+                setActiveTaskId('')
+                setIsTerminalMinimized(true)
+              }, 2000)
+            }
+          }
+        } catch(e) {
+          console.error("Error fetching logs", e)
+        }
+      }, 1000)
     }
+    return () => { if (interval) clearInterval(interval) }
+  }, [activeTaskId, selectedCliente, selectedPeriodo, activeStep])
+
+  useEffect(() => {
+    let intervalId
+    if (activeTaskId) {
+      intervalId = setInterval(() => { fetchTableData() }, 5000)
+    }
+    return () => { if (intervalId) clearInterval(intervalId) }
+  }, [activeTaskId, selectedCliente, selectedPeriodo, activeStep])
+
+  const waitForTask = (taskId) => {
+    return new Promise((resolve) => {
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/bot/logs/${taskId}`)
+          if (res.ok) {
+            const data = await res.json()
+            if (data.is_running === false) {
+              clearInterval(interval)
+              resolve(true)
+            }
+          }
+        } catch(e) {
+          clearInterval(interval)
+          resolve(false)
+        }
+      }, 2000)
+    })
   }
 
-  const handleBotAction = async (action) => {
+  const handleBotActionRaw = async (action, extraPayload = {}) => {
     const cliente = clientes.find(c => c.id === selectedCliente)
-    if (!cliente) return
-    
-    setNotification(`Enviando orden de ejecución al bot...`)
-    setTerminalLogs('Iniciando tarea...\n')
+    if (!cliente) return {ok: false}
     
     try {
       const response = await fetch(`${API_BASE_URL}/api/bot/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo })
+        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo, ...extraPayload })
       })
       const result = await response.json()
-      
-      if (response.ok) {
-        setNotification(`✅ ${result.message}`)
-        if (result.task_id) {
-          setActiveTaskId(result.task_id)
-        }
-      } else {
-        setNotification(`❌ Error: ${result.detail || 'Error en el servidor'}`)
-        setTerminalLogs(`Error de API: ${result.detail || 'Desconocido'}\n`)
-      }
-      
-      setTimeout(() => setNotification(''), 5000)
+      return {ok: response.ok, ...result}
     } catch (e) {
-      setNotification(`❌ Error de conexión con FastAPI en el puerto 8000. ¿Está corriendo uvicorn?`)
-      setTerminalLogs(`Error de conexión al puerto 8000.\n`)
-      setTimeout(() => setNotification(''), 5000)
+      return {ok: false, detail: 'Error de conexión'}
     }
   }
 
-  const handleExportPdfs = async (tipo_libro, allow_incomplete = false) => {
+  const handleBotAction = async (action, extraPayload = {}) => {
+    addToast(`Enviando orden de ejecución...`, 'info')
+    setTerminalLogs('Iniciando tarea...\n')
+    setIsTerminalMinimized(false)
+    
+    const result = await handleBotActionRaw(action, extraPayload)
+    if (result.ok) {
+      addToast(`✅ ${result.message}`, 'success')
+      if (result.task_id) setActiveTaskId(result.task_id)
+    } else {
+      addToast(`❌ Error: ${result.detail || 'Error en el servidor'}`, 'danger')
+      setTerminalLogs(`Error de API: ${result.detail || 'Desconocido'}\n`)
+    }
+  }
+
+  const handleSyncSireFisicos = async () => {
+    const cliente = clientes.find(c => c.id === selectedCliente)
+    if (!cliente || !selectedPeriodo) return
+
+    const hasCreds = cliente.client_id_api && cliente.client_secret_api
+    
+    if (!hasCreds) {
+      addToast('Verificando credenciales mediante automatización...', 'info')
+      setTerminalLogs('Generando credenciales API...\n')
+      const loginRes = await handleBotActionRaw('automation-login')
+      if (loginRes.ok) {
+        if (loginRes.task_id) {
+          setActiveTaskId(loginRes.task_id)
+          await waitForTask(loginRes.task_id)
+        }
+      } else {
+        addToast('❌ Error al generar credenciales', 'danger')
+        return
+      }
+    }
+    
+    addToast('Iniciando descarga de comprobantes físicos...', 'info')
+    handleBotAction('download-fisicos')
+  }
+
+  const handleAddClient = async () => {
+    if (!newClient.ruc || !newClient.razon_social) {
+      addToast('RUC y Razón Social son obligatorios', 'warning')
+      return
+    }
+    const { data, error } = await supabase.from('clientes').insert([newClient]).select()
+    if (error) {
+      addToast(`Error al agregar: ${error.message}`, 'danger')
+    } else if (data && data.length > 0) {
+      addToast('Cliente agregado correctamente', 'success')
+      setClientes([...clientes, data[0]])
+      setSelectedCliente(data[0].id)
+      setShowAddClientModal(false)
+      setNewClient({ ruc: '', razon_social: '', usuario_sol: '', clave_sol: '', rubro: '', cuentas_contables: '' })
+    }
+  }
+
+  const handleSaveClient = async () => {
+    if (!editingClient) return
+    const { error } = await supabase.from('clientes').update({
+      usuario_sol: editingClient.usuario_sol,
+      clave_sol: editingClient.clave_sol,
+      client_id_api: editingClient.client_id_api,
+      client_secret_api: editingClient.client_secret_api,
+      rubro: editingClient.rubro,
+      cuentas_contables: editingClient.cuentas_contables
+    }).eq('id', editingClient.id)
+
+    if (error) addToast(`Error al guardar: ${error.message}`, 'danger')
+    else {
+      addToast('Credenciales guardadas', 'success')
+      setClientes(clientes.map(c => c.id === editingClient.id ? editingClient : c))
+      setShowSettingsModal(false)
+    }
+  }
+
+  const handleExportExcel = (urlOrAction) => {
+    if (!selectedCliente || !selectedPeriodo) return
+    const url = `${API_BASE_URL}/api/export/excel/${selectedCliente}/${selectedPeriodo}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = true
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }
+
+  const handleExportPdfs = async (tipo_libro) => {
     const cliente = clientes.find(c => c.id === selectedCliente)
     if (!cliente) return
     
-    setNotification(`Generando PDF consolidado de ${tipo_libro}...`)
+    addToast(`Generando PDF consolidado de ${tipo_libro}...`, 'info')
     try {
       const response = await fetch(`${API_BASE_URL}/api/export/pdf-merged`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo, tipo_libro, allow_incomplete })
+        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo, tipo_libro, allow_incomplete: true })
       })
-      
       if (!response.ok) {
         const errorData = await response.json()
-        setNotification(`❌ Error: ${errorData.detail || 'Error al generar PDF'}`)
-        setTimeout(() => setNotification(''), 4000)
+        addToast(`Error: ${errorData.detail || 'Error al generar PDF'}`, 'danger')
         return
       }
-      
       const blob = await response.blob()
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -279,374 +338,414 @@ function App() {
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
-      
-      setNotification(`✅ PDF consolidado de ${tipo_libro} descargado con éxito.`)
-      setTimeout(() => setNotification(''), 4000)
+      addToast(`PDF consolidado de ${tipo_libro} descargado.`, 'success')
     } catch (e) {
-      setNotification(`❌ Error de conexión al exportar.`)
-      setTimeout(() => setNotification(''), 4000)
+      addToast(`Error de conexión al exportar.`, 'danger')
     }
   }
 
+  const handleExportPreliminarExcel = async () => {
+    const cliente = clientes.find(c => c.id === selectedCliente)
+    if (!cliente || !selectedPeriodo) return
+    
+    addToast(`Generando Excel Preliminar con liquidación de impuestos...`, 'info')
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/export/preliminar-excel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo })
+      })
+      if (!response.ok) {
+        addToast(`Error al generar Excel preliminar`, 'danger')
+        return
+      }
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Preliminar_${cliente.ruc}_${selectedPeriodo}.xlsx`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      addToast(`Excel Preliminar descargado.`, 'success')
+    } catch (e) {
+      addToast(`Error de conexión al exportar.`, 'danger')
+    }
+  }
+
+  const currentClient = clientes.find(c => c.id === selectedCliente)
+  const isReadyToProcess = selectedCliente && selectedPeriodo
+
   return (
-    <div className="app-container">
-      <header className="header animate-fade-in">
-        <h1>Contax Dashboard</h1>
-        <p>Monitor de Procesamiento SIRE en Tiempo Real</p>
-      </header>
+    <div className="app-layout">
+      {/* Sidebar */}
+      <aside className="sidebar animate-slide-up">
+        <div className="brand">
+          <h1>Contax</h1>
+          <p>Inteligencia Contable</p>
+        </div>
 
-      {/* Selector de Contexto */}
-      <div className="glass-panel controls-row animate-fade-in" style={{animationDelay: '0.1s'}}>
-        <div className="control-group">
-          <label>Cliente</label>
-          <select value={selectedCliente} onChange={e => setSelectedCliente(e.target.value)}>
-            <option value="">-- Seleccionar Cliente --</option>
-            {clientes.map(c => (
-              <option key={c.id} value={c.id}>{c.ruc} - {c.razon_social}</option>
-            ))}
-          </select>
-        </div>
-        <div className="control-group">
-          <label>Periodo (Fijo)</label>
-          <select value={selectedPeriodo} onChange={e => setSelectedPeriodo(e.target.value)}>
-            <option value="">-- Seleccionar Periodo --</option>
-            {STATIC_PERIODS.map(p => (
-              <option key={p} value={p}>{formatPeriod(p)}</option>
-            ))}
-          </select>
-        </div>
-        <div className="control-group" style={{justifyContent: 'flex-end', flex: 0.2}}>
-          <button onClick={async () => {
-            setNotification('Sincronizando archivos físicos con DB...')
-            try { await fetch(`${API_BASE_URL}/api/bot/sync-files`) } catch(e) {}
-            await fetchTableData()
-            setNotification('✅ Datos recargados')
-            setTimeout(() => setNotification(''), 3000)
-          }} title="Recargar Datos" className="bot-btn secondary"><RefreshCcw size={20}/></button>
-        </div>
-      </div>
-
-      {/* Credenciales Rápidas (Debug) */}
-      {editingClient && (
-        <div className="glass-panel animate-fade-in" style={{animationDelay: '0.12s', marginBottom: '2rem', padding: '1.5rem', borderLeft: '4px solid #8b5cf6'}}>
-          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem'}}>
-            <h3 style={{margin: 0, color: 'var(--text-color)', fontSize: '1rem'}}>🛠️ Debug: Credenciales del Cliente</h3>
-            <button onClick={handleSaveClient} className="bot-btn primary" style={{padding: '0.4rem 1rem', fontSize: '0.85rem', background: '#8b5cf6'}}>Guardar Cambios</button>
+        <div className="sidebar-controls">
+          <div className="control-group">
+            <label>Cliente</label>
+            <div style={{display: 'flex', gap: '0.5rem'}}>
+              <input
+                list="clientes-datalist"
+                placeholder="Buscar RUC o Nombre..."
+                value={clientSearchText}
+                onChange={e => {
+                  const val = e.target.value;
+                  setClientSearchText(val);
+                  const found = clientes.find(c => `${c.ruc} - ${c.razon_social}` === val);
+                  if (found) setSelectedCliente(found.id);
+                  else if (val === '') setSelectedCliente('');
+                }}
+                style={{flex: 1, width: '100%'}}
+              />
+              <button className="btn btn-primary" style={{padding: '0.5rem', width: 'auto'}} onClick={() => setShowAddClientModal(true)} title="Agregar Cliente">
+                <UserPlus size={18} />
+              </button>
+            </div>
+            <datalist id="clientes-datalist">
+              {clientes.map(c => <option key={c.id} value={`${c.ruc} - ${c.razon_social}`} />)}
+            </datalist>
           </div>
-          <div style={{display: 'flex', gap: '1rem', flexWrap: 'wrap'}}>
-            <div className="control-group" style={{flex: '1 1 150px'}}>
-              <label>RUC (Solo lectura)</label>
-              <input type="text" value={editingClient.ruc} disabled style={{background: 'rgba(0,0,0,0.2)', color: '#888'}} />
-            </div>
-            <div className="control-group" style={{flex: '1 1 150px'}}>
-              <label>Usuario SOL</label>
-              <input type="text" value={editingClient.usuario_sol || ''} onChange={e => setEditingClient({...editingClient, usuario_sol: e.target.value})} />
-            </div>
-            <div className="control-group" style={{flex: '1 1 150px'}}>
-              <label>Clave SOL</label>
-              <input type="text" value={editingClient.clave_sol || ''} onChange={e => setEditingClient({...editingClient, clave_sol: e.target.value})} />
-            </div>
-            <div className="control-group" style={{flex: '1 1 200px'}}>
-              <label>Client ID (API)</label>
-              <input type="text" value={editingClient.client_id_api || ''} onChange={e => setEditingClient({...editingClient, client_id_api: e.target.value})} />
-            </div>
-            <div className="control-group" style={{flex: '1 1 200px'}}>
-              <label>Client Secret (API)</label>
-              <input type="text" value={editingClient.client_secret_api || ''} onChange={e => setEditingClient({...editingClient, client_secret_api: e.target.value})} />
-            </div>
+
+          <div className="control-group">
+            <label>Periodo</label>
+            <select value={selectedPeriodo} onChange={e => setSelectedPeriodo(e.target.value)}>
+              <option value="">Seleccionar...</option>
+              {STATIC_PERIODS.map(p => (
+                <option key={p} value={p}>{formatPeriod(p)}</option>
+              ))}
+            </select>
           </div>
-        </div>
-      )}
 
-      {/* Bot Actions */}
-      <div className="glass-panel animate-fade-in" style={{animationDelay: '0.15s', marginBottom: '2rem', padding: '1.5rem'}}>
-        <h3 style={{margin: '0 0 1rem 0', color: 'var(--text-color)', fontSize: '1.1rem'}}>🤖 Control de Bots (Ejecución Directa)</h3>
-        <div style={{display: 'flex', gap: '0.5rem', flexWrap: 'wrap'}}>
-          <button disabled={!selectedCliente || !selectedPeriodo} onClick={() => handleBotAction('download-api')} className="bot-btn primary">
-            <UploadCloud size={16}/> 1. Propuesta SIRE API
-          </button>
-          <button disabled={!selectedCliente} onClick={() => handleBotAction('automation-login')} className="bot-btn secondary">
-            <Activity size={16}/> 2. Generar Credenciales
-          </button>
-          <button disabled={!selectedCliente} onClick={() => handleBotAction('download-fisicos')} className="bot-btn secondary">
-            <Database size={16}/> 3. Descargar XML Físicos
-          </button>
-          <button disabled={!selectedCliente} onClick={() => handleBotAction('enrich-xml')} className="bot-btn primary" style={{background: 'var(--accent-hover)'}}>
-            <Search size={16}/> 4. Extraer Detalles XML
-          </button>
-          <button disabled={!selectedCliente} onClick={() => handleBotAction('classify-ai')} className="bot-btn" style={{background: '#8b5cf6', color: 'white'}}>
-            <BarChart3 size={16}/> 5. Clasificar con IA
-          </button>
-          <button onClick={async () => {
-            setNotification('🔄 Sincronizando archivos físicos con base de datos...')
-            try {
-              const res = await fetch(`${API_BASE_URL}/api/bot/sync-files`, { method: 'POST' })
-              const r = await res.json()
-              setNotification(`✅ ${r.message}`)
-              setTimeout(() => setNotification(''), 5000)
-            } catch(e) { setNotification('❌ Error al sincronizar') }
-          }} className="bot-btn" style={{background: '#0ea5e9', color: 'white'}} title="Escanea carpetas locales y actualiza Supabase con los archivos que realmente existen">
-            🔁 Sincronizar Archivos
-          </button>
-          <button onClick={handleResetBots} className="bot-btn" style={{background: '#ef4444', color: 'white', marginLeft: 'auto'}} title="Libera bots bloqueados. Úsalo si ves 'already running' pero no pasa nada.">
-            ⚠️ Reset Bots
-          </button>
-        </div>
-        {notification && <div className="notification">{notification}</div>}
-
-        {/* Console Window */}
-        {(activeTaskId || terminalLogs) && (
-          <div className="terminal-window animate-fade-in" style={{marginTop: '1rem'}}>
-            <div className="terminal-header">
-              <span style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-                <Terminal size={14} /> Terminal: {activeTaskId || 'Finalizado'}
-              </span>
-              {activeTaskId && <Activity size={14} className="animate-pulse" style={{color: '#10b981'}} />}
-            </div>
-            <pre className="terminal-content" ref={terminalRef}>
-              {terminalLogs}
-            </pre>
-          </div>
-        )}
-      </div>
-
-      {/* Pestañas de Fases */}
-      <div className="phases-container animate-fade-in" style={{animationDelay: '0.2s'}}>
-        {PHASES.map(phase => {
-          const Icon = phase.icon
-          return (
-            <button 
-              key={phase.id} 
-              className={`phase-btn ${selectedPhase === phase.id ? 'active' : ''}`}
-              onClick={() => setSelectedPhase(phase.id)}
-            >
-              <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-                <Icon size={18} />
-                {phase.label}
+          {currentClient && (
+            <div className="control-group" style={{marginTop: '1rem', padding: '1.2rem', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px'}}>
+              <div style={{fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem'}}>Giro / Rubro</div>
+              <div style={{color: '#e2e8f0', fontSize: '0.9rem', marginBottom: '1rem', fontWeight: 500}}>{currentClient.rubro || 'General'}</div>
+              
+              <div style={{fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem'}}>Clasificación IA (Cuentas)</div>
+              <div style={{color: currentClient.cuentas_contables ? '#a78bfa' : '#94a3b8', fontSize: '0.85rem', lineHeight: '1.4'}}>
+                {currentClient.cuentas_contables || 'Uso de Plan Contable General (PCGE completo)'}
               </div>
-            </button>
-          )
-        })}
-      </div>
 
-      {/* Panel de Estadísticas */}
-      {selectedCliente && selectedPeriodo && (
-        <>
-          <div className="stats-grid animate-fade-in" style={{animationDelay: '0.3s'}}>
-            <div className="glass-panel stat-card">
-              <div className="stat-title">Total Comprobantes (Ventas)</div>
-              <div className="stat-value">{stats.totalVentas}</div>
-              <div className="stat-desc">En este periodo</div>
-            </div>
-            <div className="glass-panel stat-card">
-              <div className="stat-title">Total Comprobantes (Compras)</div>
-              <div className="stat-value">{stats.totalCompras}</div>
-              <div className="stat-desc">En este periodo</div>
-            </div>
-            
-            {selectedPhase === 'descargados' && (
-              <>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">Descargados Exitosamente</div>
-                  <div className="stat-value" style={{color: '#4ade80'}}>{stats.validos}</div>
-                  <div className="stat-desc">XML & PDF guardados</div>
-                </div>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">En Cola / Pendientes</div>
-                  <div className="stat-value" style={{color: '#facc15'}}>{stats.pendientes}</div>
-                  <div className="stat-desc">Esperando descarga</div>
-                </div>
-              </>
-            )}
-            
-            {selectedPhase === 'enriquecimiento1' && (
-              <>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">Glosa Extraída</div>
-                  <div className="stat-value" style={{color: '#4ade80'}}>{stats.validos}</div>
-                  <div className="stat-desc">XML parseado con éxito</div>
-                </div>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">Por Extraer / Error</div>
-                  <div className="stat-value" style={{color: '#facc15'}}>{stats.pendientes}</div>
-                  <div className="stat-desc">Falta leer XML</div>
-                </div>
-              </>
-            )}
-
-            {selectedPhase === 'enriquecimiento2' && (
-              <>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">Clasificados por IA</div>
-                  <div className="stat-value" style={{color: '#8b5cf6'}}>{stats.validos}</div>
-                  <div className="stat-desc">Cuenta PCGE asignada</div>
-                </div>
-                <div className="glass-panel stat-card">
-                  <div className="stat-title">Por Clasificar</div>
-                  <div className="stat-value" style={{color: '#facc15'}}>{stats.pendientes}</div>
-                  <div className="stat-desc">Esperando a la IA</div>
-                </div>
-              </>
-            )}
-            
-            {selectedPhase === 'preliminar' && (
-              <div className="glass-panel stat-card" style={{gridColumn: 'span 2'}}>
-                <div className="stat-title">Total Preliminares</div>
-                <div className="stat-value">{stats.validos}</div>
-                <div className="stat-desc">Extraídos de TXT</div>
-              </div>
-            )}
-          </div>
-
-          {/* Acciones Adicionales */}
-          {selectedPhase === 'descargados' && (
-            <div className="glass-panel animate-fade-in" style={{marginBottom: '1rem', padding: '1rem', display: 'flex', gap: '1rem', justifyContent: 'flex-end', animationDelay: '0.35s', flexWrap: 'wrap'}}>
-              <button onClick={() => handleExportPdfs('COMPRAS', false)} className="bot-btn primary" style={{fontSize: '0.85rem', padding: '0.5rem 1rem', background: '#3b82f6'}}>
-                <Download size={14}/> Consolidar Compras (Estricto)
-              </button>
-              <button onClick={() => handleExportPdfs('COMPRAS', true)} className="bot-btn secondary" style={{fontSize: '0.85rem', padding: '0.5rem 1rem'}}>
-                <Download size={14}/> Consolidar Compras (Incompleto)
-              </button>
-              <button onClick={() => handleExportPdfs('VENTAS', false)} className="bot-btn primary" style={{fontSize: '0.85rem', padding: '0.5rem 1rem', background: '#3b82f6'}}>
-                <Download size={14}/> Consolidar Ventas (Estricto)
-              </button>
-              <button onClick={() => handleExportPdfs('VENTAS', true)} className="bot-btn secondary" style={{fontSize: '0.85rem', padding: '0.5rem 1rem'}}>
-                <Download size={14}/> Consolidar Ventas (Incompleto)
+              <button className="btn btn-secondary" style={{marginTop: '1.5rem', width: '100%', fontSize: '0.85rem'}} onClick={() => setShowSettingsModal(true)}>
+                <Settings size={15} /> Ajustar Configuración
               </button>
             </div>
           )}
+        </div>
+      </aside>
 
-          {/* Data Table */}
-          <div className="glass-panel animate-fade-in" style={{animationDelay: '0.4s'}}>
-            <div className="data-table-container" style={{maxHeight: '500px', overflowY: 'auto'}}>
-              {loading ? (
-                <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
-                  <RefreshCcw className="animate-spin" size={32} style={{margin: '0 auto 1rem'}} />
-                  Cargando datos...
+      {/* Main Content */}
+      <main className="main-content animate-fade-in" style={{animationDelay: '0.1s'}}>
+        
+        {/* Steps / Wizard */}
+        <div className="steps-container">
+          {STEPS.map((step) => {
+            const Icon = step.icon;
+            const isActive = activeStep === step.id;
+            return (
+              <div 
+                key={step.id} 
+                className={`glass-panel step-card ${isActive ? 'active' : ''}`}
+                onClick={() => setActiveStep(step.id)}
+              >
+                <div className="step-header">
+                  <div className="step-number">{step.id}</div>
+                  <div className="step-title">{step.title}</div>
                 </div>
-              ) : data.length > 0 ? (
-                <table style={{width: '100%'}}>
-                  <thead style={{position: 'sticky', top: 0, zIndex: 10, background: '#0f172a'}}>
-                    <tr>
-                      <th>Tipo</th>
-                      <th>Serie-Número</th>
-                      <th>Fecha</th>
-                      <th>RUC Tercero</th>
-                      
-                      {selectedPhase === 'descargados' && <th>Estado XML</th>}
-                      
-                      {selectedPhase === 'enriquecimiento1' && (
-                        <>
-                          <th>Estado Extracción</th>
-                          <th>Descripción (Glosa)</th>
-                        </>
-                      )}
-                      
-                      {selectedPhase === 'enriquecimiento2' && (
-                        <>
-                          <th style={{width: '25%'}}>Glosa Extraída</th>
-                          <th style={{width: '10%'}}>Base Imp.</th>
-                          <th style={{width: '10%'}}>IGV</th>
-                          <th style={{width: '15%'}}>Categoría</th>
-                          <th style={{width: '15%'}}>Cuenta Contable</th>
-                        </>
-                      )}
-                      
-                      <th>Monto Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.slice(0, itemsToShow).map((row, i) => (
-                      <tr key={i}>
-                        <td>
-                          <span className={`status-badge ${row.tipo === 'VENTA' || row.tipo_libro === 'VENTAS' ? 'status-success' : 'status-pending'}`}>
-                            {row.tipo || row.tipo_libro}
-                          </span>
-                        </td>
-                        <td>{row.serie_cdp || row.serie}-{row.nro_cp || row.numero}</td>
-                        <td>{row.fecha_emision || '-'}</td>
-                        <td>{row.nro_doc_identidad || row.ruc_tercero}</td>
-                        
-                        {selectedPhase === 'descargados' && (
-                          <td>
-                            <span className={`status-badge ${row.estado_xml === 'DESCARGADO' ? 'status-success' : row.estado_xml === 'PENDIENTE' ? 'status-pending' : 'status-error'}`}>
-                              {row.estado_xml}
-                            </span>
-                          </td>
-                        )}
-
-                        {selectedPhase === 'enriquecimiento1' && (
-                          <>
-                            <td>
-                              <span className={`status-badge ${row.estado_enriquecimiento === 'COMPLETO' ? 'status-success' : row.estado_enriquecimiento === 'ERROR' ? 'status-error' : 'status-pending'}`}>
-                                {row.estado_enriquecimiento || 'PENDIENTE'}
-                              </span>
-                            </td>
-                            <td style={{maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}} title={row.descripcion_comprobante}>
-                              {row.descripcion_comprobante || '-'}
-                            </td>
-                          </>
-                        )}
-
-                        {selectedPhase === 'enriquecimiento2' && (
-                          <>
-                            <td className="truncate-cell" title={row.descripcion_comprobante}>
-                              <div style={{fontSize: '0.85rem', color: 'var(--text-color)', opacity: 0.9}}>
-                                {row.descripcion_comprobante || 'Sin descripción'}
-                              </div>
-                            </td>
-                            <td>S/ {Number(row.bi_gravado_dg || row.bi_gravada || 0).toFixed(2)}</td>
-                            <td>S/ {Number(row.igv_ipm_dg || row.igv_ipm || 0).toFixed(2)}</td>
-                            <td>
-                              <span className={`status-badge ${row.categoria ? 'status-success' : 'status-pending'}`} style={row.categoria ? {background: 'rgba(139, 92, 246, 0.2)', color: '#a78bfa'} : {}}>
-                                {row.categoria || 'Pendiente'}
-                              </span>
-                            </td>
-                            <td>
-                              {row.cuenta_contable ? (
-                                <div style={{display: 'flex', flexDirection: 'column', gap: '0.2rem'}}>
-                                  <span style={{fontWeight: '600', color: '#a78bfa'}}>{row.cuenta_contable}</span>
-                                  <span style={{fontSize: '0.75rem', opacity: 0.8}} title={row.descripcion_cuenta}>{row.descripcion_cuenta}</span>
-                                </div>
-                              ) : (
-                                <span className="status-badge status-pending">Pendiente</span>
-                              )}
-                            </td>
-                          </>
-                        )}
-
-                        <td>S/ {row.total_cp?.toFixed(2) || (row.monto_total || row.mto_imp_venta || 0).toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
-                  No hay datos para esta fase.
-                </div>
-              )}
-            </div>
-            
-            {/* Load More Button */}
-            {data.length > itemsToShow && (
-              <div style={{textAlign: 'center', padding: '1rem', borderTop: '1px solid rgba(255,255,255,0.05)'}}>
-                <button 
-                  onClick={() => setItemsToShow(prev => prev + 50)} 
-                  className="bot-btn secondary"
-                  style={{margin: '0 auto', fontSize: '0.85rem', padding: '0.4rem 1.2rem'}}
-                >
-                  Cargar 50 más (Mostrando {itemsToShow} de {data.length})
-                </button>
+                
+                {/* Botones de acción contextuales por paso */}
+                {isActive && (
+                  <div className="step-actions animate-fade-in">
+                    {step.id === 1 && (
+                      <>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleBotAction('download-api')} className="btn btn-outline">
+                          <UploadCloud size={16} /> 1. Propuesta SIRE API
+                        </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={handleSyncSireFisicos} className="btn btn-primary">
+                          <Database size={16} /> 2. Autenticar & Descargar Físicos
+                        </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleExportPdfs('COMPRAS')} className="btn btn-secondary">
+                          <Download size={16} /> Consolidar PDFs Compras
+                        </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleExportPdfs('VENTAS')} className="btn btn-secondary">
+                          <Download size={16} /> Consolidar PDFs Ventas
+                        </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={handleExportPreliminarExcel} className="btn btn-primary" style={{background: 'linear-gradient(135deg, #10b981, #047857)'}}>
+                          <Download size={16} /> {!!activeTaskId ? 'Sincronizando...' : 'Excel Preliminar'}
+                        </button>
+                      </>
+                    )}
+                    {step.id === 2 && (
+                      <>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleBotAction('enrich-xml')} className="btn btn-primary" style={{background: 'linear-gradient(135deg, #ec4899, #be185d)'}}>
+                          <Search size={16} /> Extraer Glosas de XML
+                        </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleBotAction('classify-ai')} className="btn btn-primary">
+                          <BarChart3 size={16} /> Clasificar con Inteligencia Artificial
+                        </button>
+                      </>
+                    )}
+                    {step.id === 3 && (
+                      <>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={handleExportExcel} className="btn btn-primary" style={{background: 'linear-gradient(135deg, #10b981, #047857)'}}>
+                          <Download size={16} /> Exportar Excel Final
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
+            )
+          })}
+        </div>
+
+        {/* Terminal Log */}
+        {(activeTaskId || terminalLogs) && (
+          <div className="terminal-window animate-fade-in" style={{ height: isTerminalMinimized ? 'auto' : undefined }}>
+            <div 
+              className="terminal-header" 
+              style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} 
+              onClick={() => setIsTerminalMinimized(!isTerminalMinimized)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <Terminal size={14} style={{ marginRight: '8px' }} />
+                <span>Proceso en ejecución: {activeTaskId || 'Finalizado'}</span>
+                {activeTaskId && <Activity size={14} className="animate-pulse" style={{ color: '#10b981', marginLeft: '8px' }} />}
+              </div>
+              <button 
+                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                title={isTerminalMinimized ? "Expandir terminal" : "Minimizar terminal"}
+              >
+                {isTerminalMinimized ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+            </div>
+            {!isTerminalMinimized && (
+              <pre className="terminal-content" ref={terminalRef}>
+                {terminalLogs}
+              </pre>
             )}
-            {data.length > 0 && data.length <= itemsToShow && (
-              <div style={{textAlign: 'center', padding: '1rem', color: '#64748b', fontSize: '0.85rem', borderTop: '1px solid rgba(255,255,255,0.05)'}}>
-                Mostrando todos los {data.length} comprobantes.
+          </div>
+        )}
+
+        {/* Data Table */}
+        <div className="glass-panel data-panel animate-slide-up" style={{animationDelay: '0.2s'}}>
+          <div className="table-header-actions">
+            <div className="table-title">
+              {(() => {
+                const StepIcon = STEPS.find(s => s.id === activeStep)?.icon;
+                return StepIcon ? <StepIcon size={20} color="#a78bfa" /> : null;
+              })()}
+              Vista de Datos
+            </div>
+            <div style={{fontSize: '0.85rem', color: 'var(--text-muted)'}}>
+              Mostrando {Math.min(itemsToShow, data.length)} de {data.length} comprobantes
+            </div>
+          </div>
+          
+          <div className="table-container">
+            {loading ? (
+              <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
+                <RefreshCcw className="animate-spin" size={32} style={{margin: '0 auto 1rem'}} />
+                Cargando datos...
+              </div>
+            ) : data.length > 0 ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Tipo</th>
+                    <th>Serie-Número</th>
+                    <th>Fecha</th>
+                    <th>RUC Tercero</th>
+                    {activeStep === 1 && (
+                      <>
+                        <th>Estado XML</th>
+                        <th>Estado PDF</th>
+                      </>
+                    )}
+                    {activeStep === 2 && (
+                      <>
+                        <th>Glosa / Descripción</th>
+                        <th>Categoría IA</th>
+                        <th>Cuenta Contable</th>
+                      </>
+                    )}
+                    <th>Monto Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.slice(0, itemsToShow).map((row, i) => (
+                    <tr key={i}>
+                      <td>
+                        <span className={`badge ${row.tipo === 'VENTA' || row.tipo_libro === 'VENTAS' ? 'badge-success' : 'badge-warning'}`}>
+                          {row.tipo || row.tipo_libro}
+                        </span>
+                      </td>
+                      <td>{row.serie_cdp || row.serie}-{row.nro_cp || row.numero}</td>
+                      <td>{row.fecha_emision || '-'}</td>
+                      <td>{row.nro_doc_identidad || row.ruc_tercero}</td>
+                      
+                      {activeStep === 1 && (
+                        <>
+                          <td><span className={`badge ${row.estado_xml === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_xml || '-'}</span></td>
+                          <td><span className={`badge ${row.estado_pdf === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_pdf || '-'}</span></td>
+                        </>
+                      )}
+
+                      {activeStep === 2 && (
+                        <>
+                          <td style={{maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
+                            {row.descripcion_comprobante || 'Sin descripción'}
+                          </td>
+                          <td><span className={`badge ${row.categoria ? 'badge-purple' : 'badge-warning'}`}>{row.categoria || 'Pendiente'}</span></td>
+                          <td><strong style={{color: '#c4b5fd'}}>{row.cuenta_contable || '-'}</strong></td>
+                        </>
+                      )}
+
+                      <td>S/ {Number(row.total_cp || row.monto_total || row.mto_imp_venta || 0).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-muted)'}}>
+                Selecciona un cliente y un periodo para visualizar la información.
               </div>
             )}
           </div>
-        </>
+          
+          {data.length > itemsToShow && (
+            <div style={{padding: '1rem', textAlign: 'center'}}>
+              <button className="btn btn-secondary" style={{width: 'auto', margin: '0 auto'}} onClick={() => setItemsToShow(p => p + 50)}>
+                Cargar más resultados
+              </button>
+            </div>
+          )}
+        </div>
+
+      </main>
+
+      {/* Settings Modal */}
+      {showSettingsModal && editingClient && (
+        <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'1.5rem'}}>
+              <h3 style={{color:'#f8fafc'}}>Configuración de Cliente</h3>
+              <button onClick={() => setShowSettingsModal(false)} style={{background:'none', border:'none', color:'#94a3b8', cursor:'pointer'}}><X size={20}/></button>
+            </div>
+            
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>RUC</label>
+              <input type="text" value={editingClient.ruc} disabled />
+            </div>
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>Razón Social</label>
+              <input type="text" value={editingClient.razon_social} disabled />
+            </div>
+            <div style={{display:'flex', gap:'1rem', marginBottom: '1rem'}}>
+              <div className="control-group" style={{flex: 1}}>
+                <label>Usuario SOL</label>
+                <input type="text" value={editingClient.usuario_sol || ''} onChange={e => setEditingClient({...editingClient, usuario_sol: e.target.value})} />
+              </div>
+              <div className="control-group" style={{flex: 1}}>
+                <label>Clave SOL</label>
+                <input type="text" value={editingClient.clave_sol || ''} onChange={e => setEditingClient({...editingClient, clave_sol: e.target.value})} />
+              </div>
+            </div>
+            <div style={{display:'flex', gap:'1rem', marginBottom: '1rem'}}>
+              <div className="control-group" style={{flex: 1}}>
+                <label>Client ID (API)</label>
+                <input type="text" value={editingClient.client_id_api || ''} onChange={e => setEditingClient({...editingClient, client_id_api: e.target.value})} />
+              </div>
+              <div className="control-group" style={{flex: 1}}>
+                <label>Client Secret (API)</label>
+                <input type="text" value={editingClient.client_secret_api || ''} onChange={e => setEditingClient({...editingClient, client_secret_api: e.target.value})} />
+              </div>
+            </div>
+            
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>Cuentas Contables (Personalizadas)</label>
+              <textarea 
+                placeholder="Ej: 6011 (Mercaderías), 6311 (Transporte)"
+                value={editingClient.cuentas_contables || ''} 
+                onChange={e => setEditingClient({...editingClient, cuentas_contables: e.target.value})} 
+                rows="3"
+                style={{
+                  fontFamily: 'Inter', background: 'rgba(0, 0, 0, 0.3)', 
+                  border: '1px solid rgba(255, 255, 255, 0.1)', color: 'var(--text-main)', 
+                  padding: '0.6rem 1rem', borderRadius: '8px', width: '100%', resize: 'vertical'
+                }}
+              />
+              <span style={{fontSize: '0.75rem', color: 'var(--text-muted)'}}>
+                La Inteligencia Artificial usará SOLAMENTE estas cuentas para este cliente. Si está vacío, usará el Plan Contable general.
+              </span>
+            </div>
+            
+            <div style={{display:'flex', justifyContent:'flex-end', gap:'1rem', marginTop:'2rem'}}>
+              <button className="btn btn-secondary" style={{width:'auto'}} onClick={() => setShowSettingsModal(false)}>Cancelar</button>
+              <button className="btn btn-primary" style={{width:'auto'}} onClick={handleSaveClient}>Guardar Cambios</button>
+            </div>
+          </div>
+        </div>
       )}
+
+      {/* Add Client Modal */}
+      {showAddClientModal && (
+        <div className="modal-overlay" onClick={() => setShowAddClientModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'1.5rem'}}>
+              <h3 style={{color:'#f8fafc'}}>Agregar Nuevo Cliente</h3>
+              <button onClick={() => setShowAddClientModal(false)} style={{background:'none', border:'none', color:'#94a3b8', cursor:'pointer'}}><X size={20}/></button>
+            </div>
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>RUC *</label>
+              <input type="text" value={newClient.ruc} onChange={e => setNewClient({...newClient, ruc: e.target.value})} placeholder="Ej: 20123456789" />
+            </div>
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>Razón Social *</label>
+              <input type="text" value={newClient.razon_social} onChange={e => setNewClient({...newClient, razon_social: e.target.value})} placeholder="Ej: MI EMPRESA S.A.C." />
+            </div>
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>Rubro / Giro de Negocio</label>
+              <input type="text" value={newClient.rubro || ''} onChange={e => setNewClient({...newClient, rubro: e.target.value})} placeholder="Ej: Venta de abarrotes, Transporte..." />
+            </div>
+            <div className="control-group" style={{marginBottom: '1rem'}}>
+              <label>Cuentas Contables (Personalizadas)</label>
+              <textarea 
+                placeholder="Ej: 6011 (Mercaderías), 6311 (Transporte)"
+                value={newClient.cuentas_contables || ''} 
+                onChange={e => setNewClient({...newClient, cuentas_contables: e.target.value})} 
+                rows="2"
+                style={{
+                  fontFamily: 'Inter', background: 'rgba(0, 0, 0, 0.3)', 
+                  border: '1px solid rgba(255, 255, 255, 0.1)', color: 'var(--text-main)', 
+                  padding: '0.6rem 1rem', borderRadius: '8px', width: '100%', resize: 'vertical'
+                }}
+              />
+            </div>
+            <div style={{display:'flex', justifyContent:'flex-end', gap:'1rem', marginTop:'2rem'}}>
+              <button className="btn btn-secondary" style={{width:'auto'}} onClick={() => setShowAddClientModal(false)}>Cancelar</button>
+              <button className="btn btn-primary" style={{width:'auto'}} onClick={handleAddClient}>Guardar Cliente</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toasts */}
+      <div className="toast-container">
+        {notifications.map(n => (
+          <div key={n.id} className="toast" style={{
+            borderLeft: `4px solid ${n.type === 'success' ? 'var(--success)' : n.type === 'danger' ? 'var(--danger)' : n.type === 'warning' ? 'var(--warning)' : 'var(--accent-primary)'}`
+          }}>
+            {n.msg}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

@@ -39,7 +39,7 @@ import zipfile
 def _extract_from_xml(xml_path: Path) -> Optional[dict]:
     """Extract key fields and item descriptions from a UBL XML or ZIP file."""
     try:
-        if xml_path.suffix.lower() == ".zip":
+        if zipfile.is_zipfile(xml_path):
             with zipfile.ZipFile(xml_path, "r") as z:
                 for name in z.namelist():
                     if name.lower().endswith(".xml"):
@@ -185,13 +185,24 @@ def match_xml_descriptions(
             infos = []
             if file_path.suffix.lower() == ".zip":
                 try:
-                    with zipfile.ZipFile(file_path, "r") as z:
+                    import io
+                    def _process_zip(z: zipfile.ZipFile, infos_list: list):
                         for name in z.namelist():
                             if name.lower().endswith(".xml"):
                                 xml_bytes = z.read(name)
                                 info = _extract_from_xml_string(xml_bytes)
                                 if info:
-                                    infos.append(info)
+                                    infos_list.append(info)
+                            elif name.lower().endswith(".zip"):
+                                try:
+                                    inner_bytes = z.read(name)
+                                    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as inner_z:
+                                        _process_zip(inner_z, infos_list)
+                                except zipfile.BadZipFile:
+                                    pass
+
+                    with zipfile.ZipFile(file_path, "r") as z:
+                        _process_zip(z, infos)
                 except zipfile.BadZipFile:
                     pass
             else:

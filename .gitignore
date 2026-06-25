@@ -28,3 +28,37 @@ Thumbs.db
 downloads/
 clients/*.csv
 brain/sunat_session.json
+
+# SUNAT Session files (tokens/cookies sensibles)
+app/brain/sunat_session_*.json
+
+# Archivos Excel con datos de clientes/contabilidad
+*.xlsx
+*.xls
+
+# Archivos de texto con datos contables
+txt compra.txt
+txt vntas.txt
+cuentas del plan contable actual.TXT
+
+# Imagenes de debug/screenshots
+*.png
+*.jpg
+*.jpeg
+
+# Scripts de prueba y scratch
+test_*.py
+check_*.py
+generar_*.py
+insert_*.py
+inspect_*.py
+recover_*.py
+scratch_*.py
+seed_*.py
+fast_classifier.py
+ai_classifier_detallado.py
+descargar_año.py
+problems.md
+
+# Snippets de Supabase (queries locales)
+supabase/snippets/

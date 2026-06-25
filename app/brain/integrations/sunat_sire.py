@@ -169,28 +169,44 @@ class SunatSireClient:
         
         logger.info(f"Requesting {book_type} download for period {period}")
         
-        try:
-            # Use GET for both
-            response = requests.get(endpoint, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # Check for error response
-            if "cod" in data and data["cod"] != "0000":
-                raise Exception(f"SUNAT error {data.get('cod')}: {data.get('msg', 'Unknown error')}")
-            
-            ticket_id = data.get("numTicket")
-            if not ticket_id:
-                raise Exception(f"No ticket ID in response: {data}")
-            
-            logger.info(f"Download requested successfully. Ticket ID: {ticket_id}")
-            
-            return ticket_id
-            
-        except requests.HTTPError as e:
-            logger.error(f"Download request failed: {e.response.text if e.response else str(e)}")
-            raise
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use GET for both
+                response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+                
+                if response.status_code == 429 and attempt < max_retries - 1:
+                    sleep_time = 5 * (attempt + 1)
+                    logger.warning(f"429 Too Many Requests. Retrying in {sleep_time}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(sleep_time)
+                    continue
+                    
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Check for error response
+                if "cod" in data and data["cod"] != "0000":
+                    raise Exception(f"SUNAT error {data.get('cod')}: {data.get('msg', 'Unknown error')}")
+                
+                ticket_id = data.get("numTicket")
+                if not ticket_id:
+                    raise Exception(f"No ticket ID in response: {data}")
+                
+                logger.info(f"Download requested successfully. Ticket ID: {ticket_id}")
+                
+                return ticket_id
+                
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429 and attempt < max_retries - 1:
+                    sleep_time = 5 * (attempt + 1)
+                    logger.warning(f"429 Too Many Requests HTTPError. Retrying in {sleep_time}s...")
+                    time.sleep(sleep_time)
+                    continue
+                logger.error(f"Download request failed: {e.response.text if e.response else str(e)}")
+                raise
+        
+        raise Exception("Max retries reached for download request")
     
     def check_ticket_status(self, ticket_id: str, period: str, *, per_page: int = 200, max_pages: int = 5) -> Dict:
         """
@@ -437,6 +453,71 @@ class SunatSireClient:
         
         return vouchers
 
+    def upload_replacement(self, period: str, book_type: Literal["sales", "purchases"], zip_path: str) -> str:
+        """
+        Upload a ZIP file to replace the SUNAT proposal.
+        
+        Args:
+            period: Tax period in format YYYYMM
+            book_type: 'sales' or 'purchases'
+            zip_path: Absolute path to the .zip file containing the .txt
+            
+        Returns:
+            Ticket ID for tracking the upload status
+        """
+        token = self.authenticate()
+        
+        # Based on standard SIRE API paths for replacement:
+        if book_type == "sales":
+            endpoint = f"{self.BASE_URL}/rvie/propuesta/web/reemplaza"
+        else:
+            endpoint = f"{self.BASE_URL}/rce/propuesta/web/reemplaza"
+            
+        import os
+        filename = os.path.basename(zip_path)
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        
+        logger.info(f"Uploading replacement ZIP for {book_type} ({period}) to {endpoint}")
+        
+        try:
+            with open(zip_path, 'rb') as f:
+                files = {
+                    'archivo': (filename, f, 'application/zip')
+                }
+                # Parameters like nomArchivo might be required as query params or form data.
+                data = {
+                    'nomArchivo': filename,
+                    'perTributario': period
+                }
+                response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=60)
+                
+                # If specific endpoint gives 404, fallback to generic
+                if response.status_code in [404, 405]:
+                    logger.warning(f"Endpoint {endpoint} failed with {response.status_code}. Trying generic endpoint.")
+                    f.seek(0)
+                    generic_endpoint = f"{self.BASE_URL}/rvierce/receptorpropuesta/web/propuesta"
+                    response = requests.post(generic_endpoint, headers=headers, files=files, data=data, timeout=60)
+
+                response.raise_for_status()
+                resp_data = response.json()
+                
+                if "cod" in resp_data and resp_data["cod"] != "0000":
+                    raise Exception(f"SUNAT error {resp_data.get('cod')}: {resp_data.get('msg', 'Unknown error')}")
+                
+                ticket_id = resp_data.get("numTicket")
+                if not ticket_id:
+                    raise Exception(f"No ticket ID in response: {resp_data}")
+                    
+                logger.info(f"Upload successful. Ticket ID: {ticket_id}")
+                return ticket_id
+                
+        except requests.HTTPError as e:
+            logger.error(f"Upload request failed: {e.response.text if e.response else str(e)}")
+            raise
 
 # Example usage
 if __name__ == "__main__":

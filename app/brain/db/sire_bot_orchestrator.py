@@ -12,7 +12,7 @@ if str(root) not in sys.path:
 from app.brain.db.supabase_client import get_supabase
 from app.brain.download_xml_scraper import CpeQuery, run_batch
 
-async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xml", headless: bool = False, ruc: str = None, periodo: str = None):
+async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xml", headless: bool = False, ruc: str = None, periodo: str = None, tipo_libro: str = None):
     """
     Busca comprobantes físicos pendientes en la base de datos, extrae la data preliminar
     requerida (monto, fecha) y orquesta la descarga usando el scraper de Playwright.
@@ -24,6 +24,8 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
         print(f"  Filtro RUC: {ruc}")
     if periodo:
         print(f"  Filtro Periodo: {periodo}")
+    if tipo_libro:
+        print(f"  Filtro Tipo Libro: {tipo_libro}")
     
     # Resolve cliente_id from RUC first (more reliable than join filter)
     cliente_id = None
@@ -50,17 +52,49 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
     if periodo:
         query = query.eq("periodo", periodo)
         
+    if tipo_libro:
+        query = query.eq("tipo_libro", tipo_libro)
+        
     response = query.limit(limit).execute()
         
     records = response.data
     if not records:
         print("No hay comprobantes pendientes por descargar.")
+    
+    # --- Fase 3B: Transicionar comprobantes con reintentos agotados a NO_EXISTE ---
+    stale_query = supabase.table("sire_comprobantes_fisicos") \
+        .select("id") \
+        .or_("estado_xml.in.(PENDIENTE,ERROR),estado_pdf.in.(PENDIENTE,ERROR)") \
+        .gte("reintentos", 10)
+    
+    if cliente_id:
+        stale_query = stale_query.eq("cliente_id", cliente_id)
+    if periodo:
+        stale_query = stale_query.eq("periodo", periodo)
+    if tipo_libro:
+        stale_query = stale_query.eq("tipo_libro", tipo_libro)
+    
+    stale_records = stale_query.limit(200).execute().data
+    if stale_records:
+        print(f"   [cementerio] {len(stale_records)} comprobantes alcanzaron 10 reintentos -> NO_EXISTE")
+        for sr in stale_records:
+            supabase.table("sire_comprobantes_fisicos") \
+                .update({
+                    "estado_xml": "NO_EXISTE",
+                    "estado_pdf": "NO_EXISTE",
+                    "error_log": "Agotados 10 reintentos sin exito"
+                }) \
+                .eq("id", sr["id"]) \
+                .execute()
+    
+    if not records:
         return
         
     print(f"Encontrados {len(records)} comprobantes en cola. Preparando queries...")
     
     queries: List[CpeQuery] = []
-    record_map: Dict[str, dict] = {} # Map key to DB record ID
+    record_map: Dict[str, dict] = {}  # key principal: period-ruc-tipo-serie-numero
+    record_map_notipo: Dict[str, dict] = {}  # key secundaria: period-ruc-serie-numero (sin tipo)
     
     for r in records:
         is_compra = (r["tipo_libro"] == "COMPRAS")
@@ -97,8 +131,12 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
         )
         queries.append(q)
         
+        # Clave principal (con tipo) — usada cuando el tipo coincide exactamente
         key = f"{q.period}-{q.ruc_emisor}-{q.tipo}-{q.serie}-{q.numero}"
         record_map[key] = r
+        # Clave secundaria (sin tipo) — usada cuando el scraper encontró el doc con un tipo alternativo (fallback)
+        key_notipo = f"{q.period}-{q.ruc_emisor}-{q.serie}-{q.numero}"
+        record_map_notipo[key_notipo] = r
         
         # Increment intentos
         supabase.table("sire_comprobantes_fisicos") \
@@ -116,7 +154,7 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
             outdir=str(Path(root) / outdir),
             prefer="either",
             headless=headless,
-            skip_existing=False,
+            skip_existing=True,  # ESTO ES VITAL: Si el archivo ya existe localmente, lo salta al instante en vez de intentar descargarlo de nuevo
             limit=limit
         )
         
@@ -125,6 +163,13 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
             key = f"{res['period']}-{res['ruc_emisor']}-{res['tipo']}-{res['serie']}-{res['numero']}"
             db_record = record_map.get(key)
             if not db_record:
+                # Fallback: el scraper usó un tipo alternativo; buscar ignorando el tipo
+                key_notipo = f"{res['period']}-{res['ruc_emisor']}-{res['serie']}-{res['numero']}"
+                db_record = record_map_notipo.get(key_notipo)
+                if db_record:
+                    print(f"   [fallback-match] Registro encontrado por clave sin tipo: {key_notipo}")
+            if not db_record:
+                print(f"   [WARN] No se encontró registro DB para resultado: {key}")
                 continue
                 
             status = res.get("status")
@@ -134,11 +179,6 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
             if status in ("ok", "skipped"):
                 paths = res.get("paths", [])
                 for ruta in paths:
-                    # Fix B: filtrar el sentinel de no-descargable
-                    if "__NO_DESCARGABLE__" in ruta:
-                        update_data["estado_xml"] = "NO_DESCARGABLE"
-                        update_data["estado_pdf"] = "NO_DESCARGABLE"
-                        break
                     ruta_lower = ruta.lower()
                     if ruta_lower.endswith(".pdf"):
                         update_data["estado_pdf"] = "DESCARGADO"
@@ -156,9 +196,16 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
 
             elif status == "not_found":
                 # El comprobante no aparece en SUNAT en absoluto
-                update_data["estado_xml"] = "NO_EXISTE"
+                update_data["estado_xml"] = "PENDIENTE"
+                update_data["error_log"] = "No encontrado en SUNAT"
+            elif status == "no_descargable":
+                # El comprobante EXISTE en SUNAT pero no tiene boton XML/PDF
+                # Estado terminal: no reintentar jamas
+                update_data["estado_xml"] = "NO_DESCARGABLE"
+                update_data["estado_pdf"] = "NO_DESCARGABLE"
+                update_data["error_log"] = "Comprobante existe en SUNAT pero sin boton de descarga (fisico/contingente/aduanas)"
             else:
-                update_data["estado_xml"] = "ERROR"
+                update_data["estado_xml"] = "PENDIENTE"
                 update_data["error_log"] = res.get("error", "Error desconocido")
                 
             supabase.table("sire_comprobantes_fisicos") \
@@ -167,6 +214,15 @@ async def orchestrate_xml_downloads(limit: int = 50, outdir: str = "downloads/xm
                 .execute()
                 
         print("Base de datos de comprobantes fisicos actualizada.")
+        
+        # AUTO-SYNC: Re-scan disco y actualizar estados DESCARGADO en la BD
+        # Esto garantiza que el frontend siempre muestre el estado real.
+        print("\nSincronizando archivos fisicos con base de datos...")
+        try:
+            from app.brain.db.sync_files import sync_files
+            sync_files()
+        except Exception as sync_err:
+            print(f"Advertencia: sync_files falló: {sync_err}")
         
     except Exception as e:
         print(f"Error catastrófico en la orquestación: {e}")
@@ -178,6 +234,7 @@ if __name__ == "__main__":
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--ruc", type=str, help="RUC de la empresa para filtrar")
     parser.add_argument("--periodo", type=str, help="Periodo a descargar (ej: 202604)")
+    parser.add_argument("--tipo_libro", type=str, help="Tipo de libro a filtrar (COMPRAS o VENTAS)")
     args = parser.parse_args()
     
-    asyncio.run(orchestrate_xml_downloads(limit=args.limit, headless=args.headless, ruc=args.ruc, periodo=args.periodo))
+    asyncio.run(orchestrate_xml_downloads(limit=args.limit, headless=args.headless, ruc=args.ruc, periodo=args.periodo, tipo_libro=args.tipo_libro))

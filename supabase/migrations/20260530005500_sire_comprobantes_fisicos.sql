@@ -16,8 +16,8 @@ CREATE TABLE sire_comprobantes_fisicos (
     numero VARCHAR(50) NOT NULL,
     
     -- Máquina de estados para Playwright
-    estado_xml VARCHAR(20) DEFAULT 'PENDIENTE' CHECK (estado_xml IN ('PENDIENTE', 'DESCARGADO', 'ERROR', 'NO_EXISTE')),
-    estado_pdf VARCHAR(20) DEFAULT 'PENDIENTE' CHECK (estado_pdf IN ('PENDIENTE', 'DESCARGADO', 'ERROR', 'NO_EXISTE')),
+    estado_xml VARCHAR(20) DEFAULT 'PENDIENTE' CHECK (estado_xml IN ('PENDIENTE', 'DESCARGADO', 'ERROR', 'NO_EXISTE', 'NO_DESCARGABLE')),
+    estado_pdf VARCHAR(20) DEFAULT 'PENDIENTE' CHECK (estado_pdf IN ('PENDIENTE', 'DESCARGADO', 'ERROR', 'NO_EXISTE', 'NO_DESCARGABLE')),
     
     -- Rutas de almacenamiento local en tu PC
     ruta_xml TEXT,

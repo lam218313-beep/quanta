@@ -410,6 +410,18 @@ def main() -> int:
         print(f"Client: {sunat_client.name} ({sunat_client.ruc})")
         print(f"==============================")
 
+        # Validar que el cliente tenga credenciales API configuradas
+        if not sunat_client.api_client_id or not sunat_client.api_client_secret:
+            msg = (
+                f"{sunat_client.ruc}:*:* -> Credenciales API faltantes. "
+                "Este cliente no tiene 'client_id_api' ni 'client_secret_api' en la BD. "
+                "Obtenlas desde SUNAT > Portal SIRE > Configuracion > Credenciales API y "
+                "actualiza el registro en la tabla 'clientes'."
+            )
+            print(f"SKIP: {msg}")
+            failures.append(msg)
+            continue
+
         client = SunatSireClient(
             client_id=sunat_client.api_client_id,
             client_secret=sunat_client.api_client_secret,

@@ -45,7 +45,7 @@ _SERIE_PREFIX_TO_TIPO: list[tuple[str, str]] = [
     # --- Notas de Crédito electrónicas ---
     ("EC",  "07"),  # Nota Crédito para documentos especiales
     ("BE",  "07"),  # Nota Crédito sobre Boleta
-    ("E",   "07"),  # Nota Crédito sobre Factura (E001, E002...)
+    # ("E",   "07"),  # Removed: E001 is often used for Facturas Electrónicas (e.g. from OSEs/airlines)
     # --- Notas de Débito electrónicas ---
     ("BD",  "08"),  # Nota Débito sobre Boleta
     ("FD",  "08"),  # Nota Débito sobre Factura
@@ -70,11 +70,27 @@ def _infer_tipo_from_serie(serie: str, tipo_original: str) -> str:
         if serie_upper.startswith(prefix):
             if tipo_inferred != tipo_original:
                 print(
-                    f"   [tipo-fix] Serie '{serie}' → tipo inferido '{tipo_inferred}' "
+                    f"   [tipo-fix] Serie '{serie}' -> tipo inferido '{tipo_inferred}' "
                     f"(SIRE dijo '{tipo_original}')"
                 )
             return tipo_inferred
     return tipo_original  # serie sin prefijo electrónico conocido
+
+
+# Tipos alternativos a probar cuando el tipo original no encuentra el comprobante.
+# Clave: tipo original → lista de tipos alternativos en orden de prioridad.
+_TIPO_FALLBACKS: dict[str, list[str]] = {
+    "01": ["07", "08"],          # Factura -> NC sobre Factura, ND sobre Factura
+    "03": ["07", "08"],          # Boleta  -> NC sobre Boleta,  ND sobre Boleta
+    "07": ["01", "03", "87"],   # NC -> Factura, Boleta, NC especial
+    "08": ["01", "03", "88"],   # ND -> Factura, Boleta, ND especial
+    "02": ["01"],               # RxH -> Factura (casos raros de OSE)
+    "30": ["01", "04"],         # Liquidacion -> Factura, Liq. compra
+    "42": ["01"],               # Doc. de pago -> Factura
+    "50": [],                   # DUA Importacion -> sin fallback (aduanas)
+    "52": [],                   # Despacho simplificado -> sin fallback
+    "53": [],                   # Declaracion mensajeria -> sin fallback
+}
 
 
 @dataclass(frozen=True)
@@ -127,7 +143,7 @@ async def _dismiss_overlays(page):
     for sel in ("#divModalCampana", "#divModalCampanaBak"):
         try:
             if await page.locator(sel).is_visible(timeout=500):
-                print(f"   Overlay detected: {sel}. Removing…")
+                print(f"   Overlay detected: {sel}. Removing...")
                 await page.evaluate(
                     f"document.querySelector('{sel}') && document.querySelector('{sel}').remove()"
                 )
@@ -142,7 +158,7 @@ async def _navigate_to_consulta_cpe(page):
     Uses the JavaScript function ``ejecuta()`` with menu code 11.38.1.1.1
     to open "Nueva Consulta de comprobantes de pago" inside #iframeApplication.
     """
-    print("Navigating to Consulta de Comprobantes de Pago…")
+    print("Navigating to Consulta de Comprobantes de Pago...")
     await page.wait_for_load_state("networkidle")
     await _dismiss_overlays(page)
 
@@ -181,6 +197,32 @@ async def _navigate_to_consulta_cpe(page):
         await frame.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         pass
+
+    # INYECTAR MUTATION OBSERVER PARA AUTO-CERRAR MODALES DE ERROR DE SUNAT INMEDIATAMENTE
+    auto_closer_js = """
+    () => {
+        if (window._sunatAutoCloserInjected) return;
+        window._sunatAutoCloserInjected = true;
+        
+        const observer = new MutationObserver((mutations) => {
+            const btns = document.querySelectorAll('button.btn-primary, .swal2-confirm');
+            for (const btn of btns) {
+                const text = (btn.innerText || '').trim().toLowerCase();
+                if (text === 'aceptar' && btn.offsetParent !== null) {
+                    // Check if it's inside an error modal (or just click it anyway to unblock)
+                    console.log('Botón Aceptar (Modal) auto-clickeado por script inyectado!');
+                    btn.click();
+                }
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+    """
+    try:
+        await page.evaluate(auto_closer_js)
+        await frame.evaluate(auto_closer_js)
+    except Exception as e:
+        print(f"   [debug] error inyectando auto-closer: {e}")
 
     await asyncio.sleep(2)
     return page, frame
@@ -272,6 +314,7 @@ async def _search_individual(
     prefer: DownloadPrefer,
     debug_dir: Optional[Path] = None,
     tmp_downloads_dir: Optional[Path] = None,
+    is_fallback: bool = False,
 ) -> List[Path]:
     """Fill the individual CPE search form, check results, and download.
 
@@ -300,14 +343,11 @@ async def _search_individual(
                 except Exception:
                     pass  # ya estaba seleccionado
                 await asyncio.sleep(0.5)
-                ruc_field = (
-                    "input[formcontrolname='rucReceptor']" if is_angular
-                    else "[name='rucEmisor']"
-                )
-                try:
-                    await frame.locator(ruc_field).fill(query.ruc_emisor, timeout=2000)
-                except Exception:
-                    pass
+                # CAMBIO: Para ventas (emitidos) NO llenamos el RUC receptor.
+                # Muchas boletas no tienen receptor (consumidor final sin DNI/RUC)
+                # y el portal de SUNAT busca por Serie+Número dentro de los comprobantes
+                # propios del contribuyente logueado — el receptor no es necesario.
+                print("   [ventas] Modo emitido: buscando solo por Serie/Número (sin RUC receptor).")
             else:
                 try:
                     await frame.locator("#recibido").check(force=True)
@@ -327,119 +367,123 @@ async def _search_individual(
 
         # 3. Tipo Comprobante (PrimeNG dropdown)
         # Bug Fix 1 & 2: mapeo extendido de tipos + timeouts aumentados
-        try:
-            dropdown = frame.locator("p-dropdown[formcontrolname='tipoComprobanteI']")
-            await dropdown.click(timeout=5000)  # Bug 2: aumentado de 2000 a 5000ms
-
-            # Bug 2: esperar explícitamente a que el panel de opciones sea visible
+        # 3. Tipo Comprobante (PrimeNG dropdown)
+        # Bug Fix 1 & 2: mapeo extendido de tipos + timeouts aumentados
+        if is_angular:
             try:
-                await frame.wait_for_selector(
-                    "p-dropdownitem li", state="visible", timeout=4000
-                )
-            except Exception:
-                pass
+                dropdown = frame.locator("p-dropdown[formcontrolname='tipoComprobanteI']")
+                await dropdown.click(timeout=5000)  # Bug 2: aumentado de 2000 a 5000ms
 
-            await asyncio.sleep(0.5)
+                # Bug 2: esperar explícitamente a que el panel de opciones sea visible
+                try:
+                    await frame.wait_for_selector(
+                        "p-dropdownitem li", state="visible", timeout=4000
+                    )
+                except Exception:
+                    pass
 
-            tipo_str = str(query.tipo).strip().zfill(2)
-            serie_str = str(query.serie).strip().upper()
+                await asyncio.sleep(0.5)
 
-            # Parte A: corregir tipo usando el prefijo de la serie cuando SIRE y portal discrepan
-            tipo_str = _infer_tipo_from_serie(query.serie, tipo_str).zfill(2)
-            # Bug 1: Catálogo completo de tipos de comprobante SUNAT (Catálogo N° 01)
-            TIPO_TEXT_MAP = {
-                "01": "Factura",
-                "02": "Recibo por Honorarios",
-                "03": "Boleta de Venta",
-                "04": "Liquidación de compra",
-                "05": "Boleto de compañía de aviación",
-                "06": "Carta de porte aéreo",
-                "07": "Nota de Crédito",   # se refina abajo según serie
-                "08": "Nota de Débito",    # se refina abajo según serie
-                "09": "Guía de remisión remitente",
-                "10": "Recibo por arrendamiento",
-                "11": "Póliza de adjudicación",
-                "12": "Ticket o cinta emitida por máquina registradora",
-                "13": "Documentos emitidos por bancos",
-                "14": "Recibo por servicios públicos",
-                "15": "Boletos emitidos por servicios de transporte",
-                "16": "Boletos emitidos por espectáculos públicos",
-                "17": "Documento de atribución",
-                "18": "Documentos emitidos por AFP",
-                "19": "Boleto o entrada por atracciones",
-                "20": "Comprobante de retención",
-                "21": "Conocimiento de embarque",
-                "22": "Comprobante por Operaciones No Habituales",
-                "23": "Póliza de seguro",
-                "24": "Certificado de renta",
-                "25": "Ticket de transporte ferroviario",
-                "26": "Recibo de gas natural",
-                "27": "Factura negociable",
-                "28": "Tarjeta de crédito",
-                "29": "Certificado de depósito",
-                "30": "Liquidación de compra",  # Bug 1: tipo 30 no estaba mapeado
-                "31": "Guía de remisión transportista",
-                "34": "Documento del operador",
-                "35": "Documento del partícipe",
-                "36": "Recibo de haber",
-                "37": "Documentos sustentatorios de operaciones de importación",
-                "40": "Comprobante de percepción",
-                "41": "Comprobante de retención electrónico",
-                "50": "Declaración Única de Aduanas (Importación definitiva)",
-                "52": "Despacho simplificado (Importación)",
-                "53": "Declaración de mensajería",
-                "56": "Declaración Única de Aduanas (Exportación definitiva)",
-                "87": "Nota de crédito especial",
-                "88": "Nota de débito especial",
-                "91": "Comprobante de no domiciliado",
-                "96": "Exceso de crédito fiscal por tasa adicional del IGV",
-                "97": "Nota de crédito - no domiciliado",
-                "98": "Nota de débito - no domiciliado",
-            }
+                tipo_str = str(query.tipo).strip().zfill(2)
+                serie_str = str(query.serie).strip().upper()
 
-            # Refinar tipos 07 y 08 según la letra de la serie
-            if tipo_str == "07":
-                if serie_str.startswith("B"):
-                    exact_text = "Boleta de Venta - Nota de Crédito"
+                # Parte A: corregir tipo usando el prefijo de la serie cuando SIRE y portal discrepan
+                if not is_fallback:
+                    tipo_str = _infer_tipo_from_serie(query.serie, tipo_str).zfill(2)
+                # Bug 1: Catálogo completo de tipos de comprobante SUNAT (Catálogo N° 01)
+                TIPO_TEXT_MAP = {
+                    "01": "Factura",
+                    "02": "Recibo por Honorarios",
+                    "03": "Boleta de Venta",
+                    "04": "Liquidación de compra",
+                    "05": "Boleto de compañía de aviación",
+                    "06": "Carta de porte aéreo",
+                    "07": "Nota de Crédito",   # se refina abajo según serie
+                    "08": "Nota de Débito",    # se refina abajo según serie
+                    "09": "Guía de remisión remitente",
+                    "10": "Recibo por arrendamiento",
+                    "11": "Póliza de adjudicación",
+                    "12": "Ticket o cinta emitida por máquina registradora",
+                    "13": "Documentos emitidos por bancos",
+                    "14": "Recibo por servicios públicos",
+                    "15": "Boletos emitidos por servicios de transporte",
+                    "16": "Boletos emitidos por espectáculos públicos",
+                    "17": "Documento de atribución",
+                    "18": "Documentos emitidos por AFP",
+                    "19": "Boleto o entrada por atracciones",
+                    "20": "Comprobante de retención",
+                    "21": "Conocimiento de embarque",
+                    "22": "Comprobante por Operaciones No Habituales",
+                    "23": "Póliza de seguro",
+                    "24": "Certificado de renta",
+                    "25": "Ticket de transporte ferroviario",
+                    "26": "Recibo de gas natural",
+                    "27": "Factura negociable",
+                    "28": "Tarjeta de crédito",
+                    "29": "Certificado de depósito",
+                    "30": "Liquidación de compra",  # Bug 1: tipo 30 no estaba mapeado
+                    "31": "Guía de remisión transportista",
+                    "34": "Documento del operador",
+                    "35": "Documento del partícipe",
+                    "36": "Recibo de haber",
+                    "37": "Documentos sustentatorios de operaciones de importación",
+                    "40": "Comprobante de percepción",
+                    "41": "Comprobante de retención electrónico",
+                    "50": "Declaración Única de Aduanas (Importación definitiva)",
+                    "52": "Despacho simplificado (Importación)",
+                    "53": "Declaración de mensajería",
+                    "56": "Declaración Única de Aduanas (Exportación definitiva)",
+                    "87": "Nota de crédito especial",
+                    "88": "Nota de débito especial",
+                    "91": "Comprobante de no domiciliado",
+                    "96": "Exceso de crédito fiscal por tasa adicional del IGV",
+                    "97": "Nota de crédito - no domiciliado",
+                    "98": "Nota de débito - no domiciliado",
+                }
+
+                # Refinar tipos 07 y 08 según la letra de la serie
+                if tipo_str == "07":
+                    if serie_str.startswith("B"):
+                        exact_text = "Boleta de Venta - Nota de Crédito"
+                    else:
+                        exact_text = "Factura - Nota de Crédito"
+                elif tipo_str == "08":
+                    if serie_str.startswith("B"):
+                        exact_text = "Boleta de Venta - Nota de Débito"
+                    else:
+                        exact_text = "Factura - Nota de Débito"
                 else:
-                    exact_text = "Factura - Nota de Crédito"
-            elif tipo_str == "08":
-                if serie_str.startswith("B"):
-                    exact_text = "Boleta de Venta - Nota de Débito"
-                else:
-                    exact_text = "Factura - Nota de Débito"
-            else:
-                exact_text = TIPO_TEXT_MAP.get(tipo_str, "")
+                    exact_text = TIPO_TEXT_MAP.get(tipo_str, "")
 
-            selected = False
-            if exact_text:
-                # Intento 1: coincidencia exacta
-                item_loc = frame.locator(f"p-dropdownitem li:text-is('{exact_text}')")
-                if await item_loc.count() > 0:
-                    await item_loc.first.click(timeout=4000)
-                    selected = True
-
-                if not selected:
-                    # Intento 2: coincidencia parcial
-                    fallback_loc = frame.locator(f"p-dropdownitem li:has-text('{exact_text}')")
-                    if await fallback_loc.count() > 0:
-                        await fallback_loc.first.click(timeout=4000)
+                selected = False
+                if exact_text:
+                    # Intento 1: coincidencia exacta
+                    item_loc = frame.locator(f"p-dropdownitem li:text-is('{exact_text}')")
+                    if await item_loc.count() > 0:
+                        await item_loc.first.click(timeout=4000)
                         selected = True
 
-            if not selected:
-                # Intento 3 (Bug 1 fallback): buscar por el código numérico directamente en el texto
-                code_loc = frame.locator(f"p-dropdownitem li:has-text('{tipo_str}')")
-                if await code_loc.count() > 0:
-                    await code_loc.first.click(timeout=4000)
-                    selected = True
-                    print(f"   Tipo {tipo_str} seleccionado por código (fallback).")
+                    if not selected:
+                        # Intento 2: coincidencia parcial
+                        fallback_loc = frame.locator(f"p-dropdownitem li:has-text('{exact_text}')")
+                        if await fallback_loc.count() > 0:
+                            await fallback_loc.first.click(timeout=4000)
+                            selected = True
 
-            if not selected:
-                print(f"   WARN: No se pudo seleccionar tipo {tipo_str} ('{exact_text}') en el dropdown. Continuando sin filtro de tipo.")
-                await frame.evaluate("document.body.click()")
+                if not selected:
+                    # Intento 3 (Bug 1 fallback): buscar por el código numérico directamente en el texto
+                    code_loc = frame.locator(f"p-dropdownitem li:has-text('{tipo_str}')")
+                    if await code_loc.count() > 0:
+                        await code_loc.first.click(timeout=4000)
+                        selected = True
+                        print(f"   Tipo {tipo_str} seleccionado por código (fallback).")
 
-        except Exception as e:
-            print(f"   Could not select tipoComprobante: {e}")
+                if not selected:
+                    print(f"   WARN: No se pudo seleccionar tipo {tipo_str} ('{exact_text}') en el dropdown. Continuando sin filtro de tipo.")
+                    await frame.evaluate("document.body.click()")
+
+            except Exception as e:
+                print(f"   Could not select tipoComprobante: {e}")
 
         # 4. Serie & Numero
         try:
@@ -456,32 +500,138 @@ async def _search_individual(
         except Exception as e:
             print(f"   Could not fill serie/numero: {e}")
 
-    elif is_hybrid:
-        # Formulario hibrido: ya se llenaron RUC/radio arriba;
-        # el dropdown de tipo NO existe (no es PrimeNG), llenar por name
-        try:
-            await frame.locator("[name='serieComprobante']").fill(query.serie, timeout=2000)
-            await frame.locator("[name='numeroComprobante']").fill(query.numero, timeout=2000)
-        except Exception as e:
-            print(f"   Could not fill serie/numero (hybrid): {e}")
 
 
-    # Click the Consultar button
-    for sel in [
+    # Selectores del botón Consultar (en orden de prioridad)
+    _CONSULTAR_SELS = [
         "#btnConsultar",
         "button:has-text('Consultar')",
         "button:has-text('Buscar')",
         "#btnAceptar",
         "button.btn-primary",
-    ]:
-        try:
-            if await frame.locator(sel).count() > 0:
-                await frame.locator(sel).first.click(timeout=8000)
-                break
-        except Exception:
-            continue
+    ]
+    # Selectores de spinner/loading que indica que SUNAT sigue procesando
+    _LOADING_SELS = [
+        "p-progressspinner",
+        ".p-progress-spinner",
+        ".loading",
+        ".spinner",
+        "[class*='loading']",
+        "[class*='spinner']",
+    ]
+    # Señales de que ya hay un resultado (modal o tabla visible)
+    _RESULT_SELS = [
+        ".swal2-popup",          # modal SweetAlert2 con el comprobante
+        "app-modal-detalle",     # modal Angular con detalle del CPE
+        ".modal.show",           # modal Bootstrap visible
+        "button[ngbtooltip*='PDF']",   # botón de descarga PDF
+        "button[ngbtooltip*='XML']",   # botón de descarga XML
+        ".button-container button",    # contenedor de botones en modal Angular
+    ]
 
-    await asyncio.sleep(3)
+    async def _has_result_or_no_result(frm) -> bool:
+        """Devuelve True si el portal ya respondió (con resultado o sin él)."""
+        try:
+            body = await frm.evaluate("document.body.innerText")
+        except Exception:
+            body = ""
+        no_result_phrases = [
+            "No se encontraron registros",
+            "0 de un total de 0",
+            "No existen datos para los criterios",
+            "El comprobante no existe",
+            "No existe información",
+            "No hay resultados para la consulta realizada",
+            "no hay resultado",
+            "sin resultados",
+        ]
+        if any(p.lower() in body.lower() for p in no_result_phrases):
+            return True  # Respondió con "no encontrado"
+        for sel in _RESULT_SELS:
+            try:
+                if await frm.locator(sel).count() > 0:
+                    return True  # Hay un modal/resultado visible
+            except Exception:
+                continue
+        return False
+
+    async def _is_still_loading(frm) -> bool:
+        """Devuelve True si hay un spinner de carga activo en el frame."""
+        for sel in _LOADING_SELS:
+            try:
+                if await frm.locator(sel).is_visible(timeout=300):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    # CAMBIO: Loop de reintento para el botón Consultar (máx. 4 intentos).
+    # Cuando SUNAT se queda cargando infinitamente, un segundo click/Enter
+    # en Consultar desbloquea el portal y muestra el resultado.
+    MAX_CONSULTAR_RETRIES = 4
+    consultar_clicked = False
+
+    for intento in range(1, MAX_CONSULTAR_RETRIES + 1):
+        # 1. Hacer click en Consultar (solo si no se hizo ya, o es reintento)
+        for sel in _CONSULTAR_SELS:
+            try:
+                if await frame.locator(sel).count() > 0:
+                    # El usuario indicó que hacer click a veces falla si está bloqueado, pero dar Tab (focus) y Enter funciona.
+                    # Simulamos exactamente eso:
+                    btn = frame.locator(sel).first
+                    await btn.evaluate("node => node.focus()")
+                    await page.keyboard.press("Enter")
+                    
+                    consultar_clicked = True
+                    if intento > 1:
+                        print(f"   [retry-consultar] Intento {intento}/{MAX_CONSULTAR_RETRIES}: re-click en Consultar (vía focus+Enter).")
+                    break
+            except Exception:
+                continue
+
+        if not consultar_clicked:
+            break  # No se encontró el botón — salir del loop
+
+        # 2. Esperar medio segundo para ver si salió la factura (indicación del usuario)
+        await asyncio.sleep(0.5)
+        if await _has_result_or_no_result(frame):
+            break
+            
+        # 3. Si no salió inmediatamente, esperar 2.5 seg más (total 3 seg)
+        await asyncio.sleep(2.5)
+
+        # 2.5 Verificar si salió un modal de error (Ej: "Error del Servidor" -> "Aceptar") y cerrarlo
+        # SUNAT a veces lanza este modal en el iframe y otras veces en la página principal (ngb-modal-window)
+        try:
+            for ctx in [page, frame]:
+                accept_btn = ctx.locator("button:has-text('Aceptar'), .swal2-confirm")
+                if await accept_btn.count() > 0 and await accept_btn.first.is_visible():
+                    print(f"   [retry-consultar] Apareció modal de error (Servidor saturado). Haciendo click en Aceptar...")
+                    await accept_btn.first.click(timeout=1000)
+                    await asyncio.sleep(1)
+                    break
+        except Exception as e:
+            print(f"   [debug] error cerrando modal: {e}")
+            pass
+
+        # 3. Verificar si ya hay respuesta del portal
+        if await _has_result_or_no_result(frame):
+            break  # Portal respondió correctamente — listo
+
+        # 4. Si sigue cargando (spinner activo), esperar un poco más antes de reintentar
+        if await _is_still_loading(frame):
+            print(f"   [retry-consultar] Portal sigue cargando tras intento {intento}. Reintentando...")
+            await asyncio.sleep(2)
+            # Continuar con el siguiente intento (re-click)
+        else:
+            # No hay spinner pero tampoco resultado — puede ser un estado intermedio
+            # Esperar un segundo adicional y verificar de nuevo
+            await asyncio.sleep(1)
+            if await _has_result_or_no_result(frame):
+                break
+            if intento < MAX_CONSULTAR_RETRIES:
+                print(f"   [retry-consultar] Sin respuesta clara tras intento {intento}. Reintentando...")
+            # continuar con el siguiente intento
 
     # Check if we got a result
     try:
@@ -499,6 +649,9 @@ async def _search_individual(
         "No existen datos para los criterios",
         "El comprobante no existe",
         "No existe información",
+        "No hay resultados para la consulta realizada",  # Modal de error del portal Angular
+        "no hay resultado",
+        "sin resultados",
     ]
     if any(t.lower() in body_text.lower() for t in not_found_texts):
         found = False
@@ -549,6 +702,9 @@ async def _search_individual(
 
     targets = []
 
+    # BUGFIX: Respetar el orden XML primero, luego PDF.
+    # Además, cuando skip_existing ya filtró parcialmente, el out_dir puede
+    # tener solo uno de los dos — aquí simplemente recolectamos los botones disponibles.
     if prefer in ("xml", "either"):
         # Check XML selectors
         for sel in xml_sels:
@@ -568,7 +724,24 @@ async def _search_individual(
                     break
             except Exception:
                 continue
-            
+
+    # Filtrar targets ya descargados para evitar re-descarga innecesaria
+    # (cuando skip_existing=True y prefer=either, puede que solo falte uno)
+    if targets:
+        xml_path_check = out_dir / "xml" / f"{base_name}.xml"
+        zip_path_check = out_dir / "xml" / f"{base_name}.zip"
+        pdf_path_check = out_dir / "pdf" / f"{base_name}.pdf"
+        filtered_targets = []
+        for ft, loc in targets:
+            if ft == "xml" and (xml_path_check.exists() or zip_path_check.exists()):
+                print(f"   [skip-xml] XML ya existe localmente, omitiendo botón XML: {base_name}")
+                continue
+            if ft == "pdf" and pdf_path_check.exists():
+                print(f"   [skip-pdf] PDF ya existe localmente, omitiendo botón PDF: {base_name}")
+                continue
+            filtered_targets.append((ft, loc))
+        targets = filtered_targets
+
     # Fallback if neither found
     if not targets:
         for sel in fallback_sels:
@@ -598,9 +771,9 @@ async def _search_individual(
                 await asyncio.sleep(0.3)
         except Exception:
             pass
-        # Fix B: retornar sentinel especial para que el orchestrator sepa que el doc
-        # existe en SUNAT pero no tiene archivo descargable (no confundir con NO_EXISTE)
-        return [Path("__NO_DESCARGABLE__")]
+        # No se encontro boton de descarga con este tipo de comprobante.
+        # Retornar centinela para que run_batch decida si probar fallbacks o marcar NO_DESCARGABLE.
+        return "no_descargable"
 
 
     # Download the files
@@ -825,7 +998,7 @@ async def run_batch(
             await context.add_cookies(cookies)
 
             page = await context.new_page()
-            print(f"Navigating to SUNAT Main Menu for {ruc_cliente}…")
+            print(f"Navigating to SUNAT Main Menu for {ruc_cliente}...")
             await page.goto(MENU_URL)
             await _dismiss_overlays(page)
 
@@ -874,7 +1047,9 @@ async def run_batch(
                 safe_book = (q.book or "cpe").strip() or "cpe"
                 # Bug 3: cuando ruc_emisor está vacío (ej. boletas de venta propias),
                 # usar ruc_cliente como identificador para evitar nombre "--03-EB01-XXXX"
-                ruc_for_name = (q.ruc_emisor or "").strip() or (q.ruc_cliente or "").strip() or "SIN_RUC"
+                ruc_for_name = (q.ruc_emisor or "").strip()
+                if not ruc_for_name or ruc_for_name == "-":
+                    ruc_for_name = (q.ruc_cliente or "").strip() or "SIN_RUC"
                 base_name = f"{ruc_for_name}-{q.tipo}-{q.serie}-{q.numero}"
                 
                 safe_ruc_cliente = q.ruc_cliente or "unknown_ruc"
@@ -893,15 +1068,30 @@ async def run_batch(
                     pass
 
                 # Skip already downloaded
+                # BUGFIX: verificar XML y PDF de forma INDEPENDIENTE.
+                # Si solo existe el PDF pero no el XML, NO saltar — intentar descargar el XML.
+                # Solo saltar si ya existen AMBOS (o si el único que se necesita ya existe).
                 if skip_existing:
                     xml_path = out_dir / "xml" / f"{base_name}.xml"
                     zip_path = out_dir / "xml" / f"{base_name}.zip"
                     pdf_path = out_dir / "pdf" / f"{base_name}.pdf"
                     
-                    if xml_path.exists() or zip_path.exists() or pdf_path.exists():
-                        existing_path = xml_path if xml_path.exists() else (zip_path if zip_path.exists() else pdf_path)
+                    xml_exists = xml_path.exists() or zip_path.exists()
+                    pdf_exists = pdf_path.exists()
+                    
+                    if prefer == "xml" and xml_exists:
+                        existing_path = xml_path if xml_path.exists() else zip_path
                         results.append(_result_dict(q, "skipped", paths=[str(existing_path)]))
                         continue
+                    elif prefer == "pdf" and pdf_exists:
+                        results.append(_result_dict(q, "skipped", paths=[str(pdf_path)]))
+                        continue
+                    elif prefer == "either" and xml_exists and pdf_exists:
+                        # Ambos ya descargados — saltar
+                        existing_path = xml_path if xml_path.exists() else zip_path
+                        results.append(_result_dict(q, "skipped", paths=[str(existing_path), str(pdf_path)]))
+                        continue
+                    # Si prefer=either y solo uno existe, continuar para intentar descargar el que falta
 
                 try:
                     saved = await _search_individual(
@@ -915,13 +1105,93 @@ async def run_batch(
                         tmp_downloads_dir=tmp_downloads_dir,
                     )
 
-                    if saved:
+                    # --- Detectar "no_descargable" para no gastar fallbacks inutilmente ---
+                    if saved == "no_descargable":
+                        # Detectar si estamos en formulario Hibrido (sin dropdown de tipo)
+                        is_hybrid_form = not (await frame.locator("p-dropdown[formcontrolname='tipoComprobanteI']").count() > 0)
+                        
+                        if is_hybrid_form:
+                            # En Hibrido, SUNAT busca solo por Serie/Numero.
+                            # Los fallbacks repetirian la misma busqueda. Marcar como no_descargable directamente.
+                            results.append(_result_dict(q, "no_descargable"))
+                            print(f"   [hibrido] Comprobante sin boton de descarga (no hay dropdown de tipo, fallbacks inutiles): {base_name}")
+                            await _clear_form(frame, page=page)
+                            continue
+                        
+                        # En Angular, intentar fallbacks porque el tipo podria ser incorrecto
+                        fallback_tipos = _TIPO_FALLBACKS.get(q.tipo, [])
+                        if not fallback_tipos:
+                            # Sin fallbacks definidos para este tipo -> marcar directamente
+                            results.append(_result_dict(q, "no_descargable"))
+                            print(f"   Comprobante sin boton de descarga y sin fallbacks para tipo '{q.tipo}': {base_name}")
+                            await _clear_form(frame, page=page)
+                            continue
+                        
+                        # Probar fallbacks
+                        found_via_fallback = False
+                        for alt_tipo in fallback_tipos:
+                            print(f"   [fallback] Tipo '{q.tipo}' no descargable. Reintentando con tipo '{alt_tipo}'...")
+                            await _clear_form(frame, page=page)
+                            q_alt = replace(q, tipo=alt_tipo)
+                            alt_base_name = f"{ruc_for_name}-{alt_tipo}-{q.serie}-{q.numero}"
+                            saved = await _search_individual(
+                                page=page,
+                                frame=frame,
+                                query=q_alt,
+                                out_dir=out_dir,
+                                base_name=alt_base_name,
+                                prefer=prefer,
+                                debug_dir=debug_dir,
+                                tmp_downloads_dir=tmp_downloads_dir,
+                                is_fallback=True,
+                            )
+                            if saved and saved != "no_descargable":
+                                found_via_fallback = True
+                                print(f"   [fallback] Encontrado con tipo alternativo '{alt_tipo}': {alt_base_name}")
+                                break
+                            if saved == "no_descargable":
+                                continue  # Probar siguiente tipo alternativo
+                        
+                        if found_via_fallback:
+                            results.append(_result_dict(q, "ok", paths=[str(p) for p in saved]))
+                            print(f"Saved: {saved}")
+                        else:
+                            results.append(_result_dict(q, "no_descargable"))
+                            print(f"Comprobante encontrado pero sin descarga (todos los tipos agotados): {base_name}")
+                        
+                        await _clear_form(frame, page=page)
+                        continue
+
+                    # --- Reintento con tipos alternativos si no se encontro (not_found) ---
+                    if not saved:
+                        fallback_tipos = _TIPO_FALLBACKS.get(q.tipo, [])
+                        for alt_tipo in fallback_tipos:
+                            print(f"   [fallback] Tipo '{q.tipo}' no encontrado. Reintentando con tipo '{alt_tipo}'...")
+                            await _clear_form(frame, page=page)
+                            q_alt = replace(q, tipo=alt_tipo)
+                            alt_base_name = f"{ruc_for_name}-{alt_tipo}-{q.serie}-{q.numero}"
+                            saved = await _search_individual(
+                                page=page,
+                                frame=frame,
+                                query=q_alt,
+                                out_dir=out_dir,
+                                base_name=alt_base_name,
+                                prefer=prefer,
+                                debug_dir=debug_dir,
+                                tmp_downloads_dir=tmp_downloads_dir,
+                                is_fallback=True,
+                            )
+                            if saved and saved != "no_descargable":
+                                print(f"   [fallback] Encontrado con tipo alternativo '{alt_tipo}': {alt_base_name}")
+                                break
+
+                    if saved and saved != "no_descargable":
                         # Bug 4: pasar lista de paths guardados
                         results.append(_result_dict(q, "ok", paths=[str(p) for p in saved]))
                         print(f"Saved: {saved}")
                     else:
                         results.append(_result_dict(q, "not_found"))
-                        print(f"Not found / no download: {base_name}")
+                        print(f"Not found / no download (todos los tipos agotados): {base_name}")
 
                     # Clear the form for the next query
                     await _clear_form(frame, page=page)

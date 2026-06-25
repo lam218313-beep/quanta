@@ -49,7 +49,7 @@ def _get_plan_contable_datos(supabase) -> tuple[str, dict[str, str]]:
     """
     Obtiene las cuentas del PCGE.
     Devuelve:
-      - Un string con el resumen (solo nivel 2 y 3) para la IA.
+      - Un string con el resumen (nivel 2, 3 y 4) para la IA.
       - Un diccionario completo con codigo -> descripcion para guardar en BD.
     """
     lineas = []
@@ -72,7 +72,8 @@ def _get_plan_contable_datos(supabase) -> tuple[str, dict[str, str]]:
             codigo = row['codigo']
             descripcion = row['descripcion']
             diccionario[codigo] = descripcion
-            if row['nivel'] in [2, 3]:
+            # Incluir SOLO cuentas de nivel 4 (exactamente 4 dígitos)
+            if row['nivel'] == 4:
                 lineas.append(f"{codigo} - {descripcion}")
                 
         if len(data) < limit:
@@ -89,6 +90,7 @@ def _clasificar_con_openai(
     tipo_libro: str,
     glosas: list[str],
     plan_contable_resumen: str,
+    es_personalizado: bool = False,
 ) -> list[tuple[str | None, str | None]]:
     """
     Llama a OpenAI gpt-4o-mini para clasificar una lista de glosas.
@@ -98,12 +100,17 @@ def _clasificar_con_openai(
     client = OpenAI(api_key=api_key)
 
     tipo_texto = "compras/gastos" if tipo_libro == "COMPRAS" else "ventas/ingresos"
-    elemento_esperado = "Clase 6 (Gastos por naturaleza)" if tipo_libro == "COMPRAS" else "Clase 7 (Ingresos)"
+    elemento_esperado = "Elemento 6 (Gastos por naturaleza) o Elemento 3 (Activos)" if tipo_libro == "COMPRAS" else "Elemento 7 (Ingresos)"
 
     system_prompt = (
         "Eres un contador publico peruano experto en el Plan Contable General Empresarial (PCGE). "
         "Respondes UNICAMENTE con JSON valido, sin texto adicional ni markdown."
     )
+
+    if tipo_libro == "COMPRAS" and not es_personalizado:
+        # EL USUARIO HA PEDIDO RESTRINGIR A ELEMENTOS 6 Y 3 PARA COMPRAS
+        lineas_plan = [linea for linea in plan_contable_resumen.split('\n') if linea.strip().startswith('6') or linea.strip().startswith('3')]
+        plan_contable_resumen = '\n'.join(lineas_plan)
 
     if tipo_libro == "COMPRAS":
         lista_categorias = """   - Costo (ej. mercadería para venta, materia prima)
@@ -116,20 +123,33 @@ def _clasificar_con_openai(
    - Prestacion de Servicios (ej. honorarios, servicios brindados)
    - Otros Ingresos (ej. intereses, venta de activos fijos)"""
 
+    if es_personalizado:
+        regla_2 = "2. Usa EXCLUSIVAMENTE cuentas de la lista personalizada proporcionada. No puedes inventar cuentas."
+        regla_3 = "3. La cuenta que elijas DEBE existir EXACTAMENTE en la lista personalizada proporcionada."
+        regla_7 = "7. SI NO SABES a qué cuenta mandar una compra o gasto porque no coincide con ninguna cuenta de la lista personalizada, usa SIEMPRE '6599' (Otros gastos de gestión)."
+        plan_titulo = "CUENTAS CONTABLES PERSONALIZADAS (Solo usar códigos de esta lista):"
+    else:
+        regla_2 = "2. Usa EXCLUSIVAMENTE cuentas de EXACTAMENTE 4 DÍGITOS. Está terminantemente prohibido inventar cuentas."
+        regla_3 = "3. La cuenta que elijas DEBE existir en la lista proporcionada en PLAN CONTABLE DE 4 DÍGITOS."
+        regla_7 = "7. SI NO SABES a qué cuenta mandar una compra o gasto, usa SIEMPRE la cuenta 6599 (Otros gastos de gestión)."
+        plan_titulo = "PLAN CONTABLE DE 4 DÍGITOS (Solo usar códigos de esta lista):"
+
     user_prompt = f"""RUBRO DE LA EMPRESA: {rubro_empresa}
 TIPO DE COMPROBANTES: {tipo_texto}
 
 Tu tarea: asignar a cada item el codigo de cuenta PCGE mas apropiado y la CATEGORIA a la que pertenece.
 
-REGLAS:
+REGLAS CRÍTICAS:
 1. Usa cuentas del {elemento_esperado}.
-2. Codigo de nivel 2 o 3 digitos preferentemente.
-3. Considera el RUBRO. Si la empresa VENDE el producto -> Mercaderia (601/701). Si lo CONSUME internamente -> gasto (63x/64x/65x).
-4. Si es ambiguo, elige la mas probable dado el rubro.
+{regla_2}
+{regla_3}
+4. Considera el RUBRO. Si la empresa VENDE el producto -> es Costo/Mercaderia. Si es un servicio para el negocio (alquiler, mantenimiento, honorarios, comisiones bancarias, fletes) -> busca la cuenta especifica de Gasto por Servicios de Terceros.
 5. Para la CATEGORIA, debes elegir OBLIGATORIAMENTE una de las siguientes:
 {lista_categorias}
+6. RAZONAMIENTO: Antes de dar el código, escribe una breve justificación en 'razonamiento' evaluando de qué trata el servicio/producto.
+{regla_7}
 
-PLAN CONTABLE (nivel 2-3):
+{plan_titulo}
 {plan_contable_resumen}
 
 ITEMS A CLASIFICAR:
@@ -138,20 +158,20 @@ ITEMS A CLASIFICAR:
 Responde con este JSON exacto:
 {{
   "clasificaciones": [
-    {{"item": 1, "codigo": "601", "categoria": "Costo", "razon": "es mercaderia de venta"}},
-    {{"item": 2, "codigo": "634", "categoria": "Gasto", "razon": "mantenimiento interno"}}
+    {{"item": 1, "razonamiento": "Servicio de transporte interprovincial", "codigo": "6311", "categoria": "Gasto"}},
+    {{"item": 2, "razonamiento": "Lavado de camioneta corresponde a mantenimiento", "codigo": "6343", "categoria": "Gasto"}}
   ]
 }}"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
-            temperature=0.1,
+            temperature=0.1
         )
         text = response.choices[0].message.content.strip()
         data = json.loads(text)
@@ -202,7 +222,7 @@ def main() -> int:
     print(f"  Cuentas cargadas en diccionario: {len(diccionario_cuentas)}")
 
     # Obtener todos los clientes activos con su rubro
-    clientes_resp = supabase.table("clientes").select("id, razon_social, ruc, rubro").eq("activo", True).execute()
+    clientes_resp = supabase.table("clientes").select("id, razon_social, ruc, rubro, cuentas_contables").eq("activo", True).execute()
     clientes = {c["id"]: c for c in clientes_resp.data}
 
     total_clasificados = 0
@@ -254,8 +274,24 @@ def main() -> int:
             cliente = clientes.get(cliente_id, {})
             rubro = cliente.get("rubro") or "empresa comercial general"
             razon = cliente.get("razon_social", "Empresa")
+            cuentas_cliente = cliente.get("cuentas_contables")
 
-            print(f"\n  Cliente: {razon} | Rubro: {rubro}")
+            if cuentas_cliente and cuentas_cliente.strip():
+                plan_contable_usar = cuentas_cliente.replace(",", "\n")
+                es_personalizado = True
+                
+                # Añadir descripciones al diccionario general desde las cuentas personalizadas
+                import re
+                for cuenta_line in cuentas_cliente.split(','):
+                    match = re.search(r'(\d+)\s*\(([^)]+)\)', cuenta_line)
+                    if match:
+                        codigo, desc = match.groups()
+                        diccionario_cuentas[codigo.strip()] = desc.strip()
+            else:
+                plan_contable_usar = plan_contable_resumen
+                es_personalizado = False
+
+            print(f"\n  Cliente: {razon} | Rubro: {rubro} | Cuentas personalizadas: {es_personalizado}")
             print(f"  Comprobantes a clasificar: {len(regs)}")
 
             # Procesar en lotes de 20 para no saturar el prompt
@@ -270,12 +306,37 @@ def main() -> int:
                     rubro_empresa=rubro,
                     tipo_libro=tipo_libro,
                     glosas=glosas,
-                    plan_contable_resumen=plan_contable_resumen,
+                    plan_contable_resumen=plan_contable_usar,
+                    es_personalizado=es_personalizado,
                 )
 
                 # Actualizar en BD
                 for reg, (codigo, categoria) in zip(lote, resultados_ia):
                     if codigo:
+                        # ── Garantizar 4 dígitos ──────────────────────────────────────────
+                        # Si la IA devolvió 2 o 3 dígitos, buscar el primer hijo de 4 dígitos
+                        # en el diccionario del plan contable.
+                        if len(codigo) < 4:
+                            prefijo = codigo
+                            hijo = next(
+                                (k for k in sorted(diccionario_cuentas.keys())
+                                 if k.startswith(prefijo) and len(k) == 4),
+                                None
+                            )
+                            if hijo:
+                                print(f"    [4-dig] {codigo} → {hijo} (expandido automáticamente)")
+                                codigo = hijo
+                            else:
+                                # Fallback: buscar cualquier hijo más específico disponible
+                                hijo = next(
+                                    (k for k in sorted(diccionario_cuentas.keys())
+                                     if k.startswith(prefijo) and len(k) > len(prefijo)),
+                                    codigo  # si no hay nada, dejar como está
+                                )
+                                if hijo != codigo:
+                                    print(f"    [4-dig] {codigo} → {hijo} (fallback a cuenta más específica)")
+                                    codigo = hijo
+
                         descripcion = diccionario_cuentas.get(codigo, "")
                         supabase.table(tabla) \
                             .update({

@@ -1,12 +1,17 @@
 import sys
 import subprocess
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import threading
 import traceback
+import io
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 app = FastAPI()
 
@@ -22,6 +27,7 @@ app.add_middleware(
 class BotRequest(BaseModel):
     ruc: str
     periodo: str | None = None
+    tipo_libro: str | None = None
 
 # Store references to running tasks to prevent overlapping
 running_tasks = {}
@@ -146,17 +152,27 @@ async def trigger_download_fisicos(req: BotRequest, background_tasks: Background
         raise HTTPException(status_code=400, detail="RUC is required")
         
     task_id = f"fisicos_{req.ruc}"
+    if req.tipo_libro:
+        task_id += f"_{req.tipo_libro}"
+    
     if task_id in running_tasks:
         return {"status": "already_running", "message": "XML Scraper is already running.", "task_id": task_id}
         
     cmd = [sys.executable, "app/brain/db/sire_bot_orchestrator.py", "--limit", "200", "--ruc", req.ruc]
     if req.periodo:
         cmd += ["--periodo", req.periodo]
+    if req.tipo_libro:
+        cmd += ["--tipo_libro", req.tipo_libro]
     root_dir = Path(__file__).parent.parent
     
     running_tasks[task_id] = True
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
-    return {"status": "started", "message": f"Started XML Download bot for {req.ruc} - {req.periodo or 'todos los periodos'}", "task_id": task_id}
+    
+    msg_suffix = f" - {req.periodo or 'todos los periodos'}"
+    if req.tipo_libro:
+        msg_suffix += f" (Solo {req.tipo_libro})"
+        
+    return {"status": "started", "message": f"Started XML Download bot for {req.ruc}{msg_suffix}", "task_id": task_id}
 
 @app.post("/api/bot/sync-files")
 async def trigger_sync_files(background_tasks: BackgroundTasks):
@@ -171,6 +187,26 @@ async def trigger_sync_files(background_tasks: BackgroundTasks):
     running_tasks[task_id] = True
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
     return {"status": "started", "message": "Sincronizando archivos físicos con base de datos...", "task_id": task_id}
+
+@app.get("/api/bot/local-files")
+def get_local_files():
+    """Devuelve una lista plana de todos los nombres de archivo (.xml, .pdf, .zip) en la carpeta local downloads."""
+    root_dir = Path(__file__).parent.parent
+    downloads_dir = root_dir / "downloads"
+    
+    if not downloads_dir.exists():
+        return {"files": []}
+        
+    files = []
+    try:
+        # Escaneo ultra rápido de la carpeta de descargas
+        for f in downloads_dir.rglob("*.*"):
+            if f.suffix.lower() in ('.xml', '.pdf', '.zip'):
+                files.append(f.name)
+    except Exception:
+        pass
+        
+    return {"files": list(set(files))}
 
 @app.post("/api/bot/enrich-xml")
 async def trigger_enrich_xml(req: BotRequest, background_tasks: BackgroundTasks):
@@ -211,14 +247,15 @@ async def trigger_classify_ai(req: BotRequest, background_tasks: BackgroundTasks
 @app.get("/api/bot/logs/{task_id}")
 def get_task_logs(task_id: str):
     log_file = LOGS_DIR / f"{task_id}.log"
+    is_running = task_id in running_tasks
     if not log_file.exists():
-        return {"task_id": task_id, "logs": "No logs available yet..."}
+        return {"task_id": task_id, "logs": "No logs available yet...", "is_running": is_running}
     
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         # For huge files, we should probably read the last N lines, but for these bots it should be fine.
         content = f.read()
 
-    return {"task_id": task_id, "logs": content}
+    return {"task_id": task_id, "logs": content, "is_running": is_running}
     
 import os
 import tempfile
@@ -335,3 +372,955 @@ def sync_files_api():
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "running_tasks": list(running_tasks.keys())}
+
+
+
+
+# ─────────────────────────────────────────────
+# EXPORTAR PRELIMINAR SIRE (2 hojas: Ventas + Compras)
+# ─────────────────────────────────────────────
+
+class ExportPreliminarRequest(BaseModel):
+    ruc: str
+    periodo: str
+
+class ExportSireTxtRequest(BaseModel):
+    ruc: str
+    periodo: str
+    tipo_libro: str
+
+@app.post("/api/export/sire-txt")
+def export_sire_txt(req: ExportSireTxtRequest):
+    """Genera el TXT personalizado para el sistema contable (M1)"""
+    from app.brain.db.sire_txt_exporter import build_custom_compras_txt, build_custom_ventas_txt
+    supabase = get_supabase()
+
+    res_cli = supabase.table("clientes").select("id").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+
+    if req.tipo_libro == "COMPRAS":
+        res = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente_id).eq("periodo", req.periodo).order("fecha_emision").execute()
+        txt_content = build_custom_compras_txt(res.data, req.ruc, req.periodo)
+        filename = f"Compras_{req.periodo}_M1.txt"
+    else:
+        res = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente_id).eq("periodo", req.periodo).order("fecha_emision").execute()
+        txt_content = build_custom_ventas_txt(res.data, req.ruc, req.periodo)
+        filename = f"Ventas_{req.periodo}_M1.txt"
+
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(content=txt_content, media_type="text/plain", headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.post("/api/bot/upload-sire")
+async def bot_upload_sire(req: ExportSireTxtRequest, background_tasks: BackgroundTasks):
+    """
+    Genera el TXT de reemplazo para SIRE, lo comprime en ZIP y llama al bot 
+    para subirlo a SUNAT en segundo plano.
+    """
+    from app.brain.db.sire_txt_exporter import build_sire_compras_txt, build_sire_ventas_txt
+    import zipfile
+    import os
+    import tempfile
+    
+    supabase = get_supabase()
+
+    res_cli = supabase.table("clientes").select("*").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente = res_cli.data[0]
+
+    # 1. Generar TXT
+    if req.tipo_libro == "COMPRAS":
+        res = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente["id"]).eq("periodo", req.periodo).order("fecha_emision").execute()
+        txt_content = build_sire_compras_txt(res.data, req.ruc, req.periodo)
+        filename_txt = f"LE{req.ruc}{req.periodo}000804000211112.txt"
+    else:
+        res = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente["id"]).eq("periodo", req.periodo).order("fecha_emision").execute()
+        txt_content = build_sire_ventas_txt(res.data, req.ruc, req.periodo)
+        filename_txt = f"LE{req.ruc}{req.periodo}001404000211112.txt"
+
+    # 2. Guardar TXT y comprimir en ZIP
+    tmp_dir = tempfile.gettempdir()
+    zip_path = os.path.join(tmp_dir, filename_txt.replace(".txt", ".zip"))
+    txt_path = os.path.join(tmp_dir, filename_txt)
+    
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(txt_content)
+        
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(txt_path, arcname=filename_txt)
+
+    # 3. Llamar a la API de SIRE en background
+    def run_sire_upload_api():
+        from app.brain.integrations.sunat_sire import SunatSireClient
+        import os
+        
+        print(f"Subiendo a SUNAT SIRE vía API para {req.ruc} - {req.periodo} ({req.tipo_libro})...")
+        try:
+            # Obtener credenciales (de BD o de entorno como fallback)
+            client_id = cliente.get("api_client_id") or os.getenv("SUNAT_CLIENT_ID")
+            client_secret = cliente.get("api_client_secret") or os.getenv("SUNAT_CLIENT_SECRET")
+            ruc = cliente.get("ruc") or os.getenv("SUNAT_RUC")
+            sol_user = cliente.get("sol_user") or os.getenv("SUNAT_USERNAME")
+            sol_pass = cliente.get("sol_pass") or os.getenv("SUNAT_PASSWORD")
+
+            if not client_id or not client_secret:
+                print("Error: No hay credenciales API (client_id/client_secret) configuradas.")
+                return
+
+            client = SunatSireClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                ruc=ruc,
+                username=sol_user,
+                password=sol_pass
+            )
+            
+            book_type = "sales" if req.tipo_libro == "VENTAS" else "purchases"
+            
+            ticket_id = client.upload_replacement(
+                period=req.periodo,
+                book_type=book_type,
+                zip_path=zip_path
+            )
+            print(f"=== ÉXITO: PROPUESTA REEMPLAZADA ===")
+            print(f"Ticket generado por SUNAT: {ticket_id}")
+            
+        except Exception as e:
+            print(f"Error subiendo a la API de SUNAT: {e}")
+
+    background_tasks.add_task(run_sire_upload_api)
+
+    return {"ok": True, "message": "Bot de subida a SUNAT iniciado en segundo plano", "zip_path": zip_path}
+
+
+@app.post("/api/export/preliminar-excel")
+def export_preliminar_excel(req: ExportPreliminarRequest):
+    """Genera un Excel con 2 hojas (VENTAS, COMPRAS) con los datos crudos del
+    Preliminar SIRE. La hoja VENTAS incluye al final un cuadro de
+    Liquidación de Impuestos (RENTA MYPE 1%, IGV 18%, Crédito Fiscal, etc.)
+    """
+    supabase = get_supabase()
+
+    # ── Resolver cliente ────────────────────────────────────────────────────
+    res_cli = supabase.table("clientes").select("id, razon_social").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+    razon_social = res_cli.data[0]["razon_social"]
+
+    periodo_fmt = req.periodo  # ej: "202605"
+    try:
+        yr, mo = int(periodo_fmt[:4]), int(periodo_fmt[4:])
+        meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        periodo_label = f"{meses[mo-1]} {yr}"
+    except Exception:
+        periodo_label = periodo_fmt
+
+    # ── Obtener datos ───────────────────────────────────────────────────────
+    res_v = supabase.table("sire_preliminar_ventas") \
+        .select("*") \
+        .eq("cliente_id", cliente_id) \
+        .eq("periodo", req.periodo) \
+        .order("fecha_emision") \
+        .execute()
+
+    res_c = supabase.table("sire_preliminar_compras") \
+        .select("*") \
+        .eq("cliente_id", cliente_id) \
+        .eq("periodo", req.periodo) \
+        .order("fecha_emision") \
+        .execute()
+
+    ventas  = res_v.data or []
+    compras = res_c.data or []
+
+    # ── Estilos de utilidad ─────────────────────────────────────────────────
+    def _fill(hex_color: str) -> PatternFill:
+        return PatternFill("solid", fgColor=hex_color)
+
+    def _border_all():
+        s = Side(style="thin", color="AAAAAA")
+        return Border(left=s, right=s, top=s, bottom=s)
+
+    def _bold_font(size=10, color="000000"):
+        return Font(bold=True, size=size, color=color)
+
+    HEADER_FILL  = _fill("1A3C5E")   # azul oscuro
+    HEADER_FONT  = Font(bold=True, color="FFFFFF", size=9)
+    ALT_ROW_FILL = _fill("EBF3FA")   # azul muy claro para filas pares
+
+    # Colores del cuadro liquidación (tomados de la imagen)
+    DARK_NAVY   = _fill("1A3C5E")
+    LIGHT_GRAY  = _fill("D9D9D9")
+    YELLOW_FILL = _fill("FFFF00")
+    RED_FONT    = Font(bold=True, color="FF0000", size=10)
+    WHITE_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    NORMAL_FONT = Font(size=10)
+    BOLD_FONT   = Font(bold=True, size=10)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "PRELIMINAR_SIRE"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # HEADER DATOS CLIENTE
+    # ════════════════════════════════════════════════════════════════════════
+    ws.merge_cells("A1:K1")
+    cell_title = ws.cell(row=1, column=1, value="CIERRE TRIBUTARIO MENSUAL")
+    cell_title.font = _bold_font(size=14)
+    cell_title.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A3:E3")
+    ws.cell(row=3, column=1, value=f"Razón Social: {razon_social}").font = _bold_font(size=11)
+    ws.merge_cells("A4:E4")
+    ws.cell(row=4, column=1, value=f"RUC: {req.ruc}").font = _bold_font(size=11)
+    ws.merge_cells("A5:E5")
+    ws.cell(row=5, column=1, value=f"Periodo: {periodo_label}").font = _bold_font(size=11)
+
+    r = 7
+    header_v_row = r
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TABLA VENTAS
+    # ════════════════════════════════════════════════════════════════════════
+    headers_v = [
+        "Fecha Emisión", "Serie", "Número",
+        "RUC / DNI", "Razón Social",
+        "Base Imponible", "IGV / IPM", "Exonerado", "Inafecto",
+        "TOTAL", "Moneda"
+    ]
+    for c, h in enumerate(headers_v, 1):
+        cell = ws.cell(row=r, column=c, value=h)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _border_all()
+    ws.row_dimensions[r].height = 28
+
+    total_bi_v = 0.0
+    total_igv_v = 0.0
+    total_cp_v  = 0.0
+
+    for i, row in enumerate(ventas, 1):
+        r += 1
+        fill = ALT_ROW_FILL if i % 2 == 0 else None
+        vals = [
+            row.get("fecha_emision") or "",
+            row.get("serie_cdp") or "",
+            row.get("nro_cp") or "",
+            row.get("nro_doc_identidad") or "",
+            row.get("razon_social") or "",
+            float(row.get("bi_gravada") or 0),
+            float(row.get("igv_ipm") or 0),
+            float(row.get("mto_exonerado") or 0),
+            float(row.get("mto_inafecto") or 0),
+            float(row.get("total_cp") or 0),
+            row.get("moneda") or "PEN",
+        ]
+        total_bi_v  += vals[5]
+        total_igv_v += vals[6]
+        total_cp_v  += vals[9]
+
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.border = _border_all()
+            if fill:
+                cell.fill = fill
+            cell.alignment = Alignment(vertical="center")
+            if c in (6, 7, 8, 9, 10):
+                cell.number_format = '"S/"#,##0.00'
+
+    # Fila de totales ventas
+    total_row_v = r + 1
+    r = total_row_v
+    ws.cell(row=r, column=5, value="TOTAL VENTAS").font = _bold_font()
+    ws.cell(row=r, column=5).fill = _fill("D9EDF7")
+    for c, val in [(6, total_bi_v), (7, total_igv_v), (10, total_cp_v)]:
+        cell = ws.cell(row=r, column=c, value=val)
+        cell.font = _bold_font()
+        cell.fill = _fill("D9EDF7")
+        cell.number_format = '"S/"#,##0.00'
+        cell.border = _border_all()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TABLA COMPRAS
+    # ════════════════════════════════════════════════════════════════════════
+    r += 3
+    r_compras_hdr = r
+
+    headers_c = [
+        "Fecha Emisión", "Serie", "Número",
+        "RUC / DNI", "Razón Social",
+        "BI Gravado", "IGV / IPM", "BI No Gravado", "Valor No Grav.",
+        "TOTAL", "Moneda"
+    ]
+    for c, h in enumerate(headers_c, 1):
+        cell = ws.cell(row=r, column=c, value=h)
+        cell.fill = _fill("217346")
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _border_all()
+    ws.row_dimensions[r].height = 28
+
+    total_bi_c = 0.0
+    total_igv_c = 0.0
+    total_cp_c2 = 0.0
+
+    for i, row in enumerate(compras, 1):
+        r += 1
+        fill = ALT_ROW_FILL if i % 2 == 0 else None
+        vals = [
+            row.get("fecha_emision") or "",
+            row.get("serie_cdp") or "",
+            row.get("nro_cp") or "",
+            row.get("nro_doc_identidad") or "",
+            row.get("razon_social") or "",
+            float(row.get("bi_gravado_dg") or 0),
+            float(row.get("igv_ipm_dg") or 0),
+            float(row.get("bi_gravado_dng") or 0),
+            float(row.get("valor_adq_ng") or 0),
+            float(row.get("total_cp") or 0),
+            row.get("moneda") or "PEN",
+        ]
+        total_bi_c  += vals[5]
+        total_igv_c += vals[6]
+        total_cp_c2 += vals[9]
+
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.border = _border_all()
+            if fill:
+                cell.fill = fill
+            cell.alignment = Alignment(vertical="center")
+            if c in (6, 7, 8, 9, 10):
+                cell.number_format = '"S/"#,##0.00'
+
+    # Fila totales compras
+    total_row_c = r + 1
+    r = total_row_c
+    ws.cell(row=r, column=5, value="TOTAL COMPRAS").font = _bold_font()
+    ws.cell(row=r, column=5).fill = _fill("C8E6C9")
+    for c, val in [(6, total_bi_c), (7, total_igv_c), (10, total_cp_c2)]:
+        cell = ws.cell(row=r, column=c, value=val)
+        cell.font = _bold_font()
+        cell.fill = _fill("C8E6C9")
+        cell.number_format = '"S/"#,##0.00'
+        cell.border = _border_all()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # CUADRO DE LIQUIDACIÓN DE IMPUESTOS
+    # ════════════════════════════════════════════════════════════════════════
+    def _liq_row(ws_target, row_idx, col_a, label, prefix, value, fill_a=None, fill_b=None,
+                 font_label=None, font_val=None, num_fmt='"S/"#,##0.00'):
+        c_lbl = ws_target.cell(row=row_idx, column=col_a,     value=label)
+        c_pre = ws_target.cell(row=row_idx, column=col_a + 1, value=prefix)
+        c_val = ws_target.cell(row=row_idx, column=col_a + 2, value=value)
+
+        for c in (c_lbl, c_pre, c_val):
+            c.border = _border_all()
+        if fill_a:
+            c_lbl.fill = fill_a
+            c_pre.fill = fill_a
+            c_val.fill = fill_a
+        if fill_b:
+            c_val.fill = fill_b
+        if font_label:
+            c_lbl.font = font_label
+        if font_val:
+            c_pre.font  = font_val
+            c_val.font  = font_val
+        c_val.number_format = num_fmt
+        c_val.alignment = Alignment(horizontal="right")
+
+    LIQ_START = r + 3
+    LIQ_COL = 1
+    r = LIQ_START
+
+    # Título principal
+    ws.merge_cells(start_row=r, start_column=LIQ_COL, end_row=r, end_column=LIQ_COL + 2)
+    title_cell = ws.cell(row=r, column=LIQ_COL, value="LIQUIDACIÓN DE IMPUESTOS:")
+    title_cell.font = Font(bold=True, size=11, color="000000")
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[r].height = 18
+
+    # Sub-título
+    r += 1
+    ws.merge_cells(start_row=r, start_column=LIQ_COL, end_row=r, end_column=LIQ_COL + 2)
+    sub_cell = ws.cell(row=r, column=LIQ_COL,
+                         value=f"IMPUESTOS A PAGAR PERIODO {periodo_fmt[:4]}/{periodo_fmt[4:]}")
+    sub_cell.fill = DARK_NAVY
+    sub_cell.font = WHITE_FONT
+    sub_cell.alignment = Alignment(horizontal="center", vertical="center")
+    sub_cell.border = _border_all()
+    ws.row_dimensions[r].height = 22
+
+    r += 1  # línea vacía
+    for col in range(LIQ_COL, LIQ_COL + 3):
+        ws.cell(row=r, column=col).border = _border_all()
+
+    # Fórmulas de liquidación referenciando las filas calculadas
+    end_v = max(header_v_row + 1, total_row_v - 1)
+    end_c = max(r_compras_hdr + 1, total_row_c - 1)
+
+    r += 1
+    r_ventas_liq = r
+    _liq_row(ws, r, LIQ_COL, "TOTAL VENTAS", "S/", f"=SUM(J{header_v_row+1}:J{end_v})",
+             font_label=BOLD_FONT, font_val=BOLD_FONT)
+
+    r += 1
+    r_compras_liq = r
+    _liq_row(ws, r, LIQ_COL, "TOTAL COMPRAS", "S/", f"=SUM(J{r_compras_hdr+1}:J{end_c})",
+             font_label=BOLD_FONT, font_val=BOLD_FONT)
+
+    r += 1  # separador
+    for col in range(LIQ_COL, LIQ_COL + 3):
+        ws.cell(row=r, column=col).border = _border_all()
+
+    r += 1
+    r_renta = r
+    _liq_row(ws, r, LIQ_COL, "RENTA MYPE 1%", "S/", f"=C{r_ventas_liq}*0.01",
+             font_label=BOLD_FONT, font_val=BOLD_FONT)
+
+    r += 1
+    r_igv_ventas = r
+    _liq_row(ws, r, LIQ_COL, "IGV de ventas", "S/", f"=SUM(G{header_v_row+1}:G{end_v})",
+             font_label=NORMAL_FONT, font_val=NORMAL_FONT)
+
+    r += 1
+    r_credito = r
+    # El crédito fiscal es el IGV de Compras, es decir, el total de la columna G en la tabla COMPRAS
+    _liq_row(ws, r, LIQ_COL, "IGV de compras", "-S/", f"=G{total_row_c}",
+             font_label=NORMAL_FONT, font_val=NORMAL_FONT)
+
+    r += 1
+    r_igv_pagar = r
+    _liq_row(ws, r, LIQ_COL, "IGV A PAGAR", "S/", f"=MAX(0, C{r_igv_ventas}-C{r_credito})",
+             font_label=BOLD_FONT, font_val=BOLD_FONT,
+             num_fmt='"S/"#,##0.00')
+
+    r += 1  # separador
+    for col in range(LIQ_COL, LIQ_COL + 3):
+        ws.cell(row=r, column=col).border = _border_all()
+
+    r += 1
+    r_total_pagar = r
+    _liq_row(ws, r, LIQ_COL, "TOTAL A PAGAR", "S/", f"=C{r_renta}+C{r_igv_pagar}",
+             fill_a=YELLOW_FILL,
+             font_label=Font(bold=True, size=11),
+             font_val=Font(bold=True, size=11))
+
+    r += 1
+    r_margen = r
+    r_utilidad = r + 1
+    _liq_row(ws, r, LIQ_COL, "MARGEN DE UTILIDAD BRUTA:", "", f"=IF(C{r_ventas_liq}>0, C{r_utilidad}/C{r_ventas_liq}, 0)",
+             font_label=BOLD_FONT, font_val=BOLD_FONT, num_fmt="0.00%")
+
+    r += 1
+    _liq_row(ws, r, LIQ_COL, "UTILIDAD:", "S/", f"=C{r_ventas_liq}-C{r_compras_liq}",
+             font_label=BOLD_FONT, font_val=BOLD_FONT)
+
+    # Ancho de columnas unificado para la hoja completa
+    col_widths = [14, 8, 12, 14, 38, 14, 12, 12, 12, 13, 7]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # ── Guardar y devolver ───────────────────────────────────────────────────
+    filename = f"Preliminar_{req.ruc}_{req.periodo}.xlsx"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.get("/api/export/excel/{cliente_id}/{periodo}")
+def export_excel(cliente_id: str, periodo: str):
+    """Exporta las compras y ventas enriquecidas a Excel."""
+    import pandas as pd
+    import io
+    supabase = get_supabase()
+    
+    # Obtener el cliente para el nombre de archivo
+    res_cli = supabase.table("clientes").select("razon_social, ruc").eq("id", cliente_id).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        
+    ruc = res_cli.data[0]["ruc"]
+    razon_social = res_cli.data[0]["razon_social"].replace(" ", "_")
+    
+    # Obtener compras
+    res_compras = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente_id).eq("periodo", periodo).execute()
+    df_compras = pd.DataFrame(res_compras.data)
+    if not df_compras.empty and "created_at" in df_compras.columns:
+        df_compras = df_compras.drop(columns=["created_at", "cliente_id", "id", "error_log"], errors="ignore")
+        
+    # Obtener ventas
+    res_ventas = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente_id).eq("periodo", periodo).execute()
+    df_ventas = pd.DataFrame(res_ventas.data)
+    if not df_ventas.empty and "created_at" in df_ventas.columns:
+        df_ventas = df_ventas.drop(columns=["created_at", "cliente_id", "id", "error_log"], errors="ignore")
+        
+    # Generar Excel en memoria
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        if df_compras.empty:
+            pd.DataFrame([{"Mensaje": "Sin registros"}]).to_excel(writer, sheet_name="COMPRAS", index=False)
+        else:
+            df_compras.to_excel(writer, sheet_name="COMPRAS", index=False)
+            
+        if df_ventas.empty:
+            pd.DataFrame([{"Mensaje": "Sin registros"}]).to_excel(writer, sheet_name="VENTAS", index=False)
+        else:
+            df_ventas.to_excel(writer, sheet_name="VENTAS", index=False)
+            
+    buf.seek(0)
+    filename = f"Preliminar_{ruc}_{periodo}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+class ManualMatchRequest(BaseModel):
+    ruc: str
+    periodo: str
+    tipo_libro: str
+
+@app.post("/api/sire/manual-xml-match")
+def manual_xml_match(req: ManualMatchRequest):
+    import sys
+    from pathlib import Path
+    
+    script_path = Path(__file__).parent / "brain" / "db" / "sire_xml_manual_enricher.py"
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--ruc", req.ruc,
+        "--periodo", req.periodo,
+        "--tipo", req.tipo_libro
+    ]
+    
+    task_id = f"manual_match_{req.ruc}_{req.periodo}_{req.tipo_libro}"
+    
+    # Executar de forma asíncrona usando threading como los otros bots
+    thread = threading.Thread(target=_run_sync_process, args=(task_id, cmd, str(Path(__file__).parent.parent)))
+    thread.daemon = True
+    thread.start()
+    
+    return {"message": "Iniciado el acoplamiento manual de XMLs.", "task_id": task_id}
+
+
+# ─────────────────────────────────────────────
+# RESETEAR ENRIQUECIMIENTO XML
+# ─────────────────────────────────────────────
+
+class ResetEnriquecimientoRequest(BaseModel):
+    ruc: str
+    periodo: str
+    tipo_libro: str | None = None  # "VENTAS", "COMPRAS", o None = ambos
+
+@app.post("/api/enriquecimiento-xml/reset")
+def reset_enriquecimiento_xml(req: ResetEnriquecimientoRequest):
+    """Borra el enriquecimiento XML (estado_enriquecimiento, descripcion_comprobante, detraccion)
+    de todos los comprobantes del cliente+periodo indicados,
+    para poder volver a extraer la información de los XML desde cero.
+    """
+    supabase = get_supabase()
+
+    # Resolver cliente_id
+    res_cli = supabase.table("clientes").select("id").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+
+    campos_reset = {
+        "estado_enriquecimiento": None,
+        "descripcion_comprobante": None,
+        "detraccion": None,
+    }
+
+    totales = {"VENTAS": 0, "COMPRAS": 0}
+    tablas = []
+
+    tipo = (req.tipo_libro or "").upper()
+    if tipo == "VENTAS":
+        tablas = [("sire_preliminar_ventas", "VENTAS")]
+    elif tipo == "COMPRAS":
+        tablas = [("sire_preliminar_compras", "COMPRAS")]
+    else:
+        tablas = [
+            ("sire_preliminar_ventas", "VENTAS"),
+            ("sire_preliminar_compras", "COMPRAS"),
+        ]
+
+    for tabla, label in tablas:
+        # Solo resetear los que ya tenían estado de enriquecimiento (evitar tocar los que nunca se enriquecieron)
+        res = supabase.table(tabla) \
+            .update(campos_reset) \
+            .eq("cliente_id", cliente_id) \
+            .eq("periodo", req.periodo) \
+            .not_.is_("estado_enriquecimiento", "null") \
+            .execute()
+        count = len(res.data) if res.data else 0
+        totales[label] = count
+        print(f"[reset-xml] {label}: {count} registros limpiados (cliente {req.ruc}, periodo {req.periodo})")
+
+    return {
+        "ok": True,
+        "ruc": req.ruc,
+        "periodo": req.periodo,
+        "limpiados": totales,
+        "mensaje": f"Enriquecimiento XML eliminado: {totales['VENTAS']} ventas y {totales['COMPRAS']} compras."
+    }
+
+# ─────────────────────────────────────────────
+# RESETEAR CLASIFICACIÓN IA
+# ─────────────────────────────────────────────
+
+class ResetClasificacionRequest(BaseModel):
+    ruc: str
+    periodo: str
+    tipo_libro: str | None = None  # "VENTAS", "COMPRAS", o None = ambos
+
+@app.post("/api/clasificacion-ia/reset")
+def reset_clasificacion_ia(req: ResetClasificacionRequest):
+    """Borra la clasificación IA (cuenta_contable, descripcion_cuenta, categoria)
+    de todos los comprobantes del cliente+periodo indicados,
+    para poder volver a correr el clasificador desde cero.
+    """
+    supabase = get_supabase()
+
+    # Resolver cliente_id
+    res_cli = supabase.table("clientes").select("id").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+
+    campos_reset = {
+        "cuenta_contable": None,
+        "descripcion_cuenta": None,
+        "categoria": None,
+    }
+
+    totales = {"VENTAS": 0, "COMPRAS": 0}
+    tablas = []
+
+    tipo = (req.tipo_libro or "").upper()
+    if tipo == "VENTAS":
+        tablas = [("sire_preliminar_ventas", "VENTAS")]
+    elif tipo == "COMPRAS":
+        tablas = [("sire_preliminar_compras", "COMPRAS")]
+    else:
+        tablas = [
+            ("sire_preliminar_ventas", "VENTAS"),
+            ("sire_preliminar_compras", "COMPRAS"),
+        ]
+
+    for tabla, label in tablas:
+        # Solo resetear los que ya tenían cuenta asignada (evitar tocar los que nunca se clasificaron)
+        res = supabase.table(tabla) \
+            .update(campos_reset) \
+            .eq("cliente_id", cliente_id) \
+            .eq("periodo", req.periodo) \
+            .not_.is_("cuenta_contable", "null") \
+            .execute()
+        count = len(res.data) if res.data else 0
+        totales[label] = count
+        print(f"[reset-ia] {label}: {count} registros limpiados (cliente {req.ruc}, periodo {req.periodo})")
+
+    return {
+        "ok": True,
+        "ruc": req.ruc,
+        "periodo": req.periodo,
+        "limpiados": totales,
+        "mensaje": f"Clasificación IA eliminada: {totales['VENTAS']} ventas y {totales['COMPRAS']} compras."
+    }
+
+
+# ─────────────────────────────────────────────
+# RESETEAR PRELIMINAR SIRE
+# ─────────────────────────────────────────────
+
+@app.post("/api/preliminar/reset")
+def reset_preliminar_sire(req: ResetClasificacionRequest):
+    """Borra la data preliminar del SIRE y los registros físicos asociados
+    del cliente+periodo indicados, para poder volver a subirlos/cargarlos.
+    """
+    supabase = get_supabase()
+
+    # Resolver cliente_id
+    res_cli = supabase.table("clientes").select("id").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+
+    tipo = (req.tipo_libro or "").upper()
+    
+    # 1. Primero borrar de sire_comprobantes_fisicos por dependencias
+    query_fisicos = supabase.table("sire_comprobantes_fisicos").delete().eq("cliente_id", cliente_id).eq("periodo", req.periodo)
+    if tipo in ("VENTAS", "COMPRAS"):
+        query_fisicos = query_fisicos.eq("tipo_libro", tipo)
+    query_fisicos.execute()
+
+    totales = {"VENTAS": 0, "COMPRAS": 0}
+    tablas = []
+
+    if tipo == "VENTAS":
+        tablas = [("sire_preliminar_ventas", "VENTAS")]
+    elif tipo == "COMPRAS":
+        tablas = [("sire_preliminar_compras", "COMPRAS")]
+    else:
+        tablas = [
+            ("sire_preliminar_ventas", "VENTAS"),
+            ("sire_preliminar_compras", "COMPRAS"),
+        ]
+
+    for tabla, label in tablas:
+        res = supabase.table(tabla) \
+            .delete() \
+            .eq("cliente_id", cliente_id) \
+            .eq("periodo", req.periodo) \
+            .execute()
+        count = len(res.data) if res.data else 0
+        totales[label] = count
+        print(f"[reset-preliminar] {label}: {count} registros eliminados (cliente {req.ruc}, periodo {req.periodo})")
+
+    return {
+        "ok": True,
+        "ruc": req.ruc,
+        "periodo": req.periodo,
+        "limpiados": totales,
+        "mensaje": f"Preliminar SIRE eliminado: {totales['VENTAS']} ventas y {totales['COMPRAS']} compras."
+    }
+
+
+# ─────────────────────────────────────────────
+# GESTIÓN MANUAL DE COMPROBANTES FÍSICOS
+# ─────────────────────────────────────────────
+
+ESTADOS_VALIDOS = {"PENDIENTE", "DESCARGADO", "ERROR", "NO_EXISTE", "NO_DESCARGABLE", "DESFASADO"}
+
+class UpdateEstadoRequest(BaseModel):
+    estado_xml: str | None = None
+    estado_pdf: str | None = None
+    reset_reintentos: bool = True
+
+@app.patch("/api/comprobante/{comprobante_id}/estado")
+def update_comprobante_estado(comprobante_id: str, req: UpdateEstadoRequest):
+    """Actualiza manualmente el estado XML y/o PDF de un comprobante físico.
+    Permite por ejemplo pasar de NO_EXISTE a PENDIENTE para forzar un reintento.
+    """
+    supabase = get_supabase()
+
+    # Validaciones
+    if req.estado_xml and req.estado_xml not in ESTADOS_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"estado_xml inválido. Valores permitidos: {ESTADOS_VALIDOS}")
+    if req.estado_pdf and req.estado_pdf not in ESTADOS_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"estado_pdf inválido. Valores permitidos: {ESTADOS_VALIDOS}")
+    if not req.estado_xml and not req.estado_pdf:
+        raise HTTPException(status_code=400, detail="Debe indicar al menos estado_xml o estado_pdf")
+
+    # Verificar que el comprobante existe
+    check = supabase.table("sire_comprobantes_fisicos").select("*").eq("id", comprobante_id).execute()
+    if not check.data:
+        raise HTTPException(status_code=404, detail="Comprobante no encontrado")
+
+    comp = check.data[0]
+    update_data = {}
+    if req.estado_xml:
+        update_data["estado_xml"] = req.estado_xml
+    if req.estado_pdf:
+        update_data["estado_pdf"] = req.estado_pdf
+    if req.reset_reintentos:
+        update_data["reintentos"] = 0
+        update_data["error_log"] = None
+
+    # Eliminar archivo físico SOLO si cambiamos el estado a PENDIENTE o ERROR.
+    # NO borrar si el estado es DESCARGADO, NO_DESCARGABLE, NO_EXISTE o DESFASADO.
+    ESTADOS_SIN_BORRADO = {"DESCARGADO", "NO_DESCARGABLE", "NO_EXISTE", "DESFASADO"}
+
+    base_name = f"{comp.get('ruc_tercero', '')}-{comp.get('tipo_cp', '')}-{comp.get('serie', '')}-{comp.get('numero', '')}"
+    downloads_dir = Path(__file__).parent.parent / "downloads"
+
+    if downloads_dir.exists():
+        if req.estado_xml and req.estado_xml not in ESTADOS_SIN_BORRADO:
+            for f in downloads_dir.rglob(f"{base_name}.*"):
+                if f.suffix.lower() in ('.xml', '.zip'):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+        if req.estado_pdf and req.estado_pdf not in ESTADOS_SIN_BORRADO:
+            for f in downloads_dir.rglob(f"{base_name}.*"):
+                if f.suffix.lower() == '.pdf':
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+    supabase.table("sire_comprobantes_fisicos").update(update_data).eq("id", comprobante_id).execute()
+    return {"ok": True, "id": comprobante_id, "updated": update_data}
+
+
+# ─────────────────────────────────────────────
+# RESET MASIVO A PENDIENTE (excluyendo DESCARGADO)
+# ─────────────────────────────────────────────
+
+class ResetPendientesRequest(BaseModel):
+    ruc: str
+    periodo: str | None = None
+    tipo_libro: str | None = None   # "VENTAS", "COMPRAS" o None = ambos
+
+@app.post("/api/comprobantes/reset-pendientes")
+def reset_comprobantes_pendientes(req: ResetPendientesRequest):
+    """Pone en PENDIENTE todos los comprobantes físicos cuyo estado_xml o estado_pdf
+    NO sea DESCARGADO. Excluye los comprobantes ya descargados.
+    Útil para forzar un nuevo intento masivo del bot descargador.
+    """
+    supabase = get_supabase()
+
+    # Resolver cliente_id
+    res_cli = supabase.table("clientes").select("id").eq("ruc", req.ruc).execute()
+    if not res_cli.data:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    cliente_id = res_cli.data[0]["id"]
+
+    # Construir la query base para estados != DESCARGADO y != DESFASADO
+    # Para XML: resetear si NO está DESCARGADO ni DESFASADO
+    # Para PDF: resetear si NO está DESCARGADO ni DESFASADO
+    query_xml = (
+        supabase.table("sire_comprobantes_fisicos")
+        .update({"estado_xml": "PENDIENTE", "reintentos": 0, "error_log": None})
+        .eq("cliente_id", cliente_id)
+        .neq("estado_xml", "DESCARGADO")
+        .neq("estado_xml", "DESFASADO")
+    )
+    query_pdf = (
+        supabase.table("sire_comprobantes_fisicos")
+        .update({"estado_pdf": "PENDIENTE", "reintentos": 0, "error_log": None})
+        .eq("cliente_id", cliente_id)
+        .neq("estado_pdf", "DESCARGADO")
+        .neq("estado_pdf", "DESFASADO")
+    )
+
+    if req.periodo:
+        query_xml = query_xml.eq("periodo", req.periodo)
+        query_pdf = query_pdf.eq("periodo", req.periodo)
+
+    if req.tipo_libro:
+        query_xml = query_xml.eq("tipo_libro", req.tipo_libro.upper())
+        query_pdf = query_pdf.eq("tipo_libro", req.tipo_libro.upper())
+
+    res_xml = query_xml.execute()
+    res_pdf = query_pdf.execute()
+
+    total_xml = len(res_xml.data) if res_xml.data else 0
+    total_pdf = len(res_pdf.data) if res_pdf.data else 0
+
+    print(f"[reset-pendientes] {req.ruc} | periodo={req.periodo} | tipo={req.tipo_libro}")
+    print(f"  → XML reseteados: {total_xml} | PDF reseteados: {total_pdf}")
+
+    return {
+        "ok": True,
+        "ruc": req.ruc,
+        "periodo": req.periodo,
+        "tipo_libro": req.tipo_libro,
+        "reseteados_xml": total_xml,
+        "reseteados_pdf": total_pdf,
+        "mensaje": f"Se pusieron en PENDIENTE {total_xml} XML y {total_pdf} PDF (excluyendo DESCARGADO)."
+    }
+@app.post("/api/comprobante/{comprobante_id}/upload")
+async def upload_comprobante_file(
+    comprobante_id: str,
+    file: UploadFile = File(...),
+    file_type: str = Form(...),  # "pdf" o "xml"
+):
+    """Sube manualmente un archivo PDF o XML para un comprobante físico.
+    Guarda el archivo en la carpeta de downloads del cliente y actualiza la ruta en DB.
+    """
+    supabase = get_supabase()
+
+    # Verificar que el comprobante existe y obtener sus datos
+    check = supabase.table("sire_comprobantes_fisicos") \
+        .select("id, cliente_id, periodo, tipo_libro, serie, numero, tipo_cp, ruc_tercero, clientes!inner(ruc, razon_social)") \
+        .eq("id", comprobante_id) \
+        .execute()
+
+    if not check.data:
+        raise HTTPException(status_code=404, detail="Comprobante no encontrado")
+
+    comp = check.data[0]
+    cliente = comp.get("clientes", {})
+    ruc_cliente = cliente.get("ruc", "unknown")
+    rs_cliente = (cliente.get("razon_social") or "").strip().replace("/", "-").replace("\\", "-")
+    
+    # Sanitizar nombre de carpeta (igual que en el scraper)
+    import re
+    rs_safe = re.sub(r'[\\/*?"<>|]', "", rs_cliente).strip()
+    folder_client = f"{rs_safe} {ruc_cliente}".strip()
+
+    # Validar tipo
+    file_type = file_type.lower()
+    if file_type not in ("pdf", "xml"):
+        raise HTTPException(status_code=400, detail="file_type debe ser 'pdf' o 'xml'")
+
+    # Determinar extensión real
+    original_name = file.filename or ""
+    ext = Path(original_name).suffix.lower() or f".{file_type}"
+    if ext not in (".pdf", ".xml", ".zip"):
+        ext = f".{file_type}"
+
+    # Construir ruta destino (misma estructura que el scraper)
+    root_dir = Path(__file__).parent.parent
+    period = comp.get("periodo", "unknown")
+    book = "sales" if comp.get("tipo_libro") == "VENTAS" else "purchases"
+    subfolder = "pdf" if file_type == "pdf" else "xml"
+    
+    ruc_tercero = (comp.get("ruc_tercero") or "").strip()
+    if ruc_tercero == "-":
+        ruc_tercero = ""
+    ruc_tercero = ruc_tercero or ruc_cliente
+    
+    tipo_cp = comp.get("tipo_cp", "00")
+    serie = comp.get("serie", "")
+    numero = comp.get("numero", "")
+    base_name = f"{ruc_tercero}-{tipo_cp}-{serie}-{numero}"
+
+    dest_dir = root_dir / "downloads" / "xml" / folder_client / period / book / subfolder
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{base_name}{ext}"
+
+    # Escribir el archivo
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="El archivo está vacío")
+
+    with open(dest_path, "wb") as f:
+        f.write(contents)
+
+    # Actualizar DB
+    update_data: dict = {}
+    if file_type == "pdf":
+        update_data["ruta_pdf"] = str(dest_path)
+        update_data["estado_pdf"] = "DESCARGADO"
+    else:
+        update_data["ruta_xml"] = str(dest_path)
+        update_data["estado_xml"] = "DESCARGADO"
+    update_data["reintentos"] = 0
+    update_data["error_log"] = None
+
+    supabase.table("sire_comprobantes_fisicos").update(update_data).eq("id", comprobante_id).execute()
+
+    return {
+        "ok": True,
+        "id": comprobante_id,
+        "file_type": file_type,
+        "saved_to": str(dest_path),
+        "size_bytes": len(contents),
+    }

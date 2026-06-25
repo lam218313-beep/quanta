@@ -41,7 +41,7 @@ def reset_no_existe(ruc: str = None, periodo: str = None, dry_run: bool = False)
     query = (
         supabase.table("sire_comprobantes_fisicos")
         .select("id, serie, tipo_cp, tipo_libro, reintentos")
-        .eq("estado_xml", "NO_EXISTE")
+        .or_("estado_xml.eq.NO_EXISTE,estado_xml.eq.ERROR,estado_pdf.eq.ERROR")
     )
     if cliente_id:
         query = query.eq("cliente_id", cliente_id)
@@ -55,25 +55,16 @@ def reset_no_existe(ruc: str = None, periodo: str = None, dry_run: bool = False)
         print("No hay registros NO_EXISTE para evaluar.")
         return
 
-    electronicos = [r for r in records if _is_electronic_serie(r.get("serie", ""))]
-    fisicos      = [r for r in records if not _is_electronic_serie(r.get("serie", ""))]
-
-    print(f"\nTotal NO_EXISTE encontrados : {len(records)}")
-    print(f"  -> Con serie electronica   : {len(electronicos)}  (se resetean a PENDIENTE)")
-    print(f"  -> Con serie fisica/otra   : {len(fisicos)}  (se dejan como NO_EXISTE)")
-
-    if not electronicos:
-        print("\nNada que resetear.")
-        return
+    print(f"\nTotal a resetear : {len(records)} (se resetean todos a PENDIENTE)")
 
     if dry_run:
         print("\n[DRY RUN] Ejemplos a resetear:")
-        for r in electronicos[:20]:
+        for r in records[:20]:
             print(f"  id={r['id']} | serie={r['serie']} | tipo={r['tipo_cp']} | {r['tipo_libro']}")
         return
 
     # Resetear en lotes de 500
-    ids_to_reset = [r["id"] for r in electronicos]
+    ids_to_reset = [r["id"] for r in records]
     batch_size = 500
     reseteados = 0
 

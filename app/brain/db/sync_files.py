@@ -108,9 +108,11 @@ def sync_files():
             
         serie = row['serie']
         numero = row['numero']
-        ruc_tercero = row.get('ruc_tercero', '')
+        ruc_tercero = row.get('ruc_tercero', '').strip()
         tipo_cp = row.get('tipo_cp', '')
-        
+        if not ruc_tercero or ruc_tercero == '-':
+            ruc_tercero = client.get('ruc', '')
+            
         filename_base = f"{ruc_tercero}-{tipo_cp}-{serie}-{numero}"
         xml_name = f"{filename_base}.xml"
         zip_name = f"{filename_base}.zip"
