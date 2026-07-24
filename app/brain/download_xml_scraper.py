@@ -82,7 +82,7 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
     from app.brain.db.supabase_client import get_supabase
     
     print(f"🚀 Intentando Auto-Login interno para RUC {ruc}...")
-    context = await browser.new_context()
+    context = await browser.new_context(user_agent=_default_user_agent())
     page = await context.new_page()
     try:
         await page.goto("https://e-menu.sunat.gob.pe/cl-ti-itmenu/MenuInternet.htm")
