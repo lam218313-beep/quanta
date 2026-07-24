@@ -986,10 +986,16 @@ async def run_batch(
             try:
                 cookies = _load_sunat_session_cookies(ruc_cliente)
             except FileNotFoundError as e:
-                print(f"Error: {e}")
-                for q in client_queries:
-                    results.append(_result_dict(q, "error", error="No session cookies found"))
-                continue
+                print(f"Sesión no encontrada para {ruc_cliente}. Intentando auto-login...")
+                try:
+                    from app.brain.automation_scraper import run as auto_login
+                    await auto_login(ruc_cliente)
+                    cookies = _load_sunat_session_cookies(ruc_cliente)
+                except Exception as login_err:
+                    print(f"Error en auto-login: {login_err}")
+                    for q in client_queries:
+                        results.append(_result_dict(q, "error", error=f"No session cookies: {login_err}"))
+                    continue
 
             context = await browser.new_context(
                 user_agent=_default_user_agent(),
@@ -1009,11 +1015,25 @@ async def run_batch(
                 page, frame = await _navigate_to_consulta_cpe(page)
             except Exception as nav_err:
                 print(f"   [SESION EXPIRADA/ERROR] Cliente {ruc_cliente}: {nav_err}")
-                print(f"   Ejecuta: python app/brain/automation_scraper.py --ruc {ruc_cliente}")
-                for q in client_queries:
-                    results.append(_result_dict(q, "error", error=f"session_expired: {nav_err}"))
+                print(f"   Intentando auto-login automático...")
                 await context.close()
-                continue
+                try:
+                    from app.brain.automation_scraper import run as auto_login
+                    await auto_login(ruc_cliente)
+                    cookies = _load_sunat_session_cookies(ruc_cliente)
+                    context = await browser.new_context(user_agent=_default_user_agent(), accept_downloads=True)
+                    await context.add_cookies(cookies)
+                    page = await context.new_page()
+                    await page.goto(MENU_URL)
+                    await _dismiss_overlays(page)
+                    page, frame = await _navigate_to_consulta_cpe(page)
+                except Exception as retry_err:
+                    print(f"   Auto-login falló: {retry_err}")
+                    for q in client_queries:
+                        results.append(_result_dict(q, "error", error=f"session_expired_and_retry_failed: {retry_err}"))
+                    if 'context' in locals() and not context.is_closed():
+                        await context.close()
+                    continue
 
             # Dump the frame HTML for debug (first time only)
             try:

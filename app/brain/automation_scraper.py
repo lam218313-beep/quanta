@@ -23,8 +23,8 @@ import argparse
 
 async def run(ruc: str):
     async with async_playwright() as p:
-        # Launch browser in HEADED mode so user can see and interact
-        browser = await p.chromium.launch(headless=False)
+        # Launch browser in HEADLESS mode for Railway compatibility
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
