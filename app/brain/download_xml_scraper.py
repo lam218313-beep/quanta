@@ -117,6 +117,18 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
             print(f"⚠️ Timeout esperando MenuInternet.htm: {e}")
             print(f"   URL actual: {page.url}")
             print(f"   Título: {await page.title()}")
+            
+            # WORKAROUND: If stuck on the OAuth callback page (which has "Bienvenido a SUNAT" and an invisible form),
+            # force submit it via JS. Headless Chrome sometimes blocks auto-submitting forms across domains.
+            if "api-seguridad.sunat.gob.pe" in page.url and "code=" in page.url:
+                print("   [Workaround] Detectada pantalla intermedia de SUNAT. Forzando submit del formulario oculto...")
+                try:
+                    await page.evaluate("document.forms[0].submit()")
+                    await page.wait_for_url("**/MenuInternet.htm*", timeout=15000)
+                    print("✅ Auto-Login exitoso (después del workaround)!")
+                except Exception as ex:
+                    print(f"   [Workaround] Falló el submit forzado: {ex}")
+            
             try:
                 body_text = await page.evaluate("document.body.innerText")
                 print(f"   Texto en pantalla: {body_text[:1000]}")
