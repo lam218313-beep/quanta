@@ -30,7 +30,7 @@ const formatPeriod = (periodStr) => {
   return `${months[monthNum - 1]} ${year}`;
 }
 
-const API_BASE_URL = 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://quanta-production-07d7.up.railway.app'
 
 function App() {
   const [clientes, setClientes] = useState([])
