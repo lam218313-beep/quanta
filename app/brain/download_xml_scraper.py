@@ -77,6 +77,49 @@ def _infer_tipo_from_serie(serie: str, tipo_original: str) -> str:
     return tipo_original  # serie sin prefijo electrónico conocido
 
 
+async def _auto_login_with_browser(browser, ruc: str) -> bool:
+    """Intenta hacer login en SUNAT usando el browser ya abierto para evitar deadlocks de Playwright."""
+    from app.brain.db.supabase_client import get_supabase
+    
+    print(f"🚀 Intentando Auto-Login interno para RUC {ruc}...")
+    context = await browser.new_context()
+    page = await context.new_page()
+    try:
+        await page.goto("https://e-menu.sunat.gob.pe/cl-ti-itmenu/MenuInternet.htm")
+        await page.wait_for_load_state('domcontentloaded')
+        
+        supabase = get_supabase()
+        resp = supabase.table("clientes").select("usuario_sol, clave_sol").eq("ruc", ruc).execute()
+        if not resp.data or not resp.data[0].get("usuario_sol"):
+            print(f"❌ No se encontraron credenciales en BD para {ruc}")
+            return False
+            
+        usuario = resp.data[0].get("usuario_sol")
+        clave = resp.data[0].get("clave_sol")
+        
+        await page.fill("#txtRuc", ruc)
+        await page.fill("#txtUsuario", usuario)
+        await page.fill("#txtContrasena", clave)
+        await page.click("#btnAceptar")
+        print("   Botón Aceptar presionado. Esperando redirección...")
+        
+        await page.wait_for_url("**/MenuInternet.htm*", timeout=15000)
+        print("✅ Auto-Login exitoso! Sesión generada.")
+        
+        cookies = await context.cookies()
+        if len(cookies) > 5:
+            filepath = Path(__file__).parent / f"sunat_session_{ruc}.json"
+            with open(filepath, "w") as f:
+                json.dump(cookies, f, indent=4)
+            return True
+        return False
+    except Exception as e:
+        print(f"❌ Error en Auto-Login: {e}")
+        return False
+    finally:
+        await context.close()
+
+
 # Tipos alternativos a probar cuando el tipo original no encuentra el comprobante.
 # Clave: tipo original → lista de tipos alternativos en orden de prioridad.
 _TIPO_FALLBACKS: dict[str, list[str]] = {
@@ -987,14 +1030,12 @@ async def run_batch(
                 cookies = _load_sunat_session_cookies(ruc_cliente)
             except FileNotFoundError as e:
                 print(f"Sesión no encontrada para {ruc_cliente}. Intentando auto-login...")
-                try:
-                    from app.brain.automation_scraper import run as auto_login
-                    await auto_login(ruc_cliente)
+                success = await _auto_login_with_browser(browser, ruc_cliente)
+                if success:
                     cookies = _load_sunat_session_cookies(ruc_cliente)
-                except Exception as login_err:
-                    print(f"Error en auto-login: {login_err}")
+                else:
                     for q in client_queries:
-                        results.append(_result_dict(q, "error", error=f"No session cookies: {login_err}"))
+                        results.append(_result_dict(q, "error", error=f"No session cookies and autologin failed"))
                     continue
 
             context = await browser.new_context(
@@ -1017,22 +1058,28 @@ async def run_batch(
                 print(f"   [SESION EXPIRADA/ERROR] Cliente {ruc_cliente}: {nav_err}")
                 print(f"   Intentando auto-login automático...")
                 await context.close()
-                try:
-                    from app.brain.automation_scraper import run as auto_login
-                    await auto_login(ruc_cliente)
+                
+                success = await _auto_login_with_browser(browser, ruc_cliente)
+                if success:
                     cookies = _load_sunat_session_cookies(ruc_cliente)
                     context = await browser.new_context(user_agent=_default_user_agent(), accept_downloads=True)
                     await context.add_cookies(cookies)
                     page = await context.new_page()
                     await page.goto(MENU_URL)
                     await _dismiss_overlays(page)
-                    page, frame = await _navigate_to_consulta_cpe(page)
-                except Exception as retry_err:
-                    print(f"   Auto-login falló: {retry_err}")
+                    try:
+                        page, frame = await _navigate_to_consulta_cpe(page)
+                    except Exception as retry_err:
+                        print(f"   Auto-login falló: {retry_err}")
+                        for q in client_queries:
+                            results.append(_result_dict(q, "error", error=f"session_expired_and_retry_failed: {retry_err}"))
+                        if 'context' in locals() and not context.is_closed():
+                            await context.close()
+                        continue
+                else:
+                    print("   Auto-login falló. Saltando cliente.")
                     for q in client_queries:
-                        results.append(_result_dict(q, "error", error=f"session_expired_and_retry_failed: {retry_err}"))
-                    if 'context' in locals() and not context.is_closed():
-                        await context.close()
+                        results.append(_result_dict(q, "error", error=f"session_expired and autologin failed"))
                     continue
 
             # Dump the frame HTML for debug (first time only)
