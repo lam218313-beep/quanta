@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
-import { Activity, Database, CheckCircle, RefreshCcw, Search, BarChart3, UploadCloud, Terminal, Download, Edit2, X, Upload, ChevronRight, ChevronDown, ChevronUp, UserPlus, Settings } from 'lucide-react'
+import { Activity, Database, CheckCircle, RefreshCcw, Search, BarChart3, UploadCloud, Terminal, Download, Edit2, X, Upload, ChevronRight, ChevronDown, ChevronUp, UserPlus, Settings, FileText, Calculator } from 'lucide-react'
 import { supabase } from './supabaseClient'
 import './App.css'
+import FacturacionView from './components/FacturacionView'
 
 const STEPS = [
   { id: 1, title: 'Sincronización SIRE', icon: Database, phaseFilter: 'descargados' },
@@ -36,6 +37,7 @@ function App() {
   const [selectedCliente, setSelectedCliente] = useState('')
   const [selectedPeriodo, setSelectedPeriodo] = useState('')
   const [activeStep, setActiveStep] = useState(1)
+  const [activeMainTab, setActiveMainTab] = useState('contabilidad')
   
   const [loading, setLoading] = useState(false)
   const [data, setData] = useState([])
@@ -386,6 +388,26 @@ function App() {
           <p>Inteligencia Contable</p>
         </div>
 
+
+        {/* Main tab navigation - hidden temporarily */}
+        <div className="main-tabs-container" style={{display: 'none'}}>
+          <button 
+            className={`main-tab-btn ${activeMainTab === 'contabilidad' ? 'active' : ''}`}
+            onClick={() => setActiveMainTab('contabilidad')}
+          >
+            <Calculator size={18} />
+            <span>Contabilidad Automática</span>
+          </button>
+          <button 
+            className={`main-tab-btn ${activeMainTab === 'facturacion' ? 'active' : ''}`}
+            onClick={() => setActiveMainTab('facturacion')}
+          >
+            <FileText size={18} />
+            <span>Facturación y Guías</span>
+          </button>
+        </div>
+
+
         <div className="sidebar-controls">
           <div className="control-group">
             <label>Cliente</label>
@@ -442,6 +464,8 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content animate-fade-in" style={{animationDelay: '0.1s'}}>
+        {activeMainTab === 'contabilidad' ? (
+          <>
         
         {/* Steps / Wizard */}
         <div className="steps-container">
@@ -628,6 +652,16 @@ function App() {
           )}
         </div>
 
+                </>
+        ) : (
+          <FacturacionView 
+            clientes={clientes}
+            selectedCliente={selectedCliente}
+            onSelectCliente={setSelectedCliente}
+            addToast={addToast}
+            apiBaseUrl={API_BASE_URL}
+          />
+        )}
       </main>
 
       {/* Settings Modal */}

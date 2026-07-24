@@ -358,3 +358,46 @@ tr:hover td {
   font-weight: 500;
   animation: slideInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+
+/* Main Tabs Navigation in Sidebar */
+.main-tabs-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.main-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #94a3b8;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  text-align: left;
+}
+
+.main-tab-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.main-tab-btn.active {
+  background: rgba(124, 58, 237, 0.15);
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  color: #c084fc;
+}
+
+.main-tab-btn svg {
+  flex-shrink: 0;
+}

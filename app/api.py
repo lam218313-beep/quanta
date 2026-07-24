@@ -1,4 +1,5 @@
 import sys
+import os
 import subprocess
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Form
@@ -9,6 +10,7 @@ import asyncio
 import threading
 import traceback
 import io
+import time
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -37,8 +39,8 @@ LOGS_DIR = Path(__file__).parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 
 def _run_sync_process(task_id: str, command: list, cwd: str):
+    """Runs a command capturing stdout via PIPE (for headless/CLI processes)."""
     log_file = LOGS_DIR / f"{task_id}.log"
-    # Overwrite the log file for each new execution of the same task_id
     with open(log_file, "w", encoding="utf-8") as f:
         f.write(f"[{task_id}] Starting command: {' '.join(command)}\n")
         print(f"[{task_id}] Starting command: {' '.join(command)}")
@@ -58,7 +60,6 @@ def _run_sync_process(task_id: str, command: list, cwd: str):
                 running_tasks[task_id] = process
                 
             for line in process.stdout:
-                # Write to file and print to console
                 f.write(line)
                 f.flush()
                 print(f"[{task_id}] {line.strip()}")
@@ -75,8 +76,50 @@ def _run_sync_process(task_id: str, command: list, cwd: str):
             if task_id in running_tasks:
                 del running_tasks[task_id]
 
-async def run_command_in_background(task_id: str, command: list, cwd: str):
-    thread = threading.Thread(target=_run_sync_process, args=(task_id, command, cwd))
+def _run_headed_process(task_id: str, command: list, cwd: str):
+    """
+    Runs a GUI/headed process (e.g. Playwright with headless=False) writing stdout
+    DIRECTLY to the log file instead of via subprocess.PIPE.
+    This avoids the EPIPE 'broken pipe' crash that occurs when Playwright's internal
+    Node.js driver writes events back through a captured pipe.
+    """
+    log_file = LOGS_DIR / f"{task_id}.log"
+    with open(log_file, "w", encoding="utf-8") as log_fh:
+        log_fh.write(f"[{task_id}] Starting headed command: {' '.join(command)}\n")
+        log_fh.flush()
+        print(f"[{task_id}] Starting headed command: {' '.join(command)}")
+        
+        try:
+            # Write directly to file — no PIPE, no EPIPE
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=log_fh,
+                stderr=log_fh,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                env={**os.environ, "PYTHONUNBUFFERED": "1"}  # force line-buffered output
+            )
+            if task_id in running_tasks:
+                running_tasks[task_id] = process
+                
+            process.wait()
+            log_fh.write(f"[{task_id}] Finished with return code {process.returncode}\n")
+            log_fh.flush()
+            print(f"[{task_id}] Headed process finished with return code {process.returncode}")
+        except Exception as e:
+            err_trace = traceback.format_exc()
+            log_fh.write(f"[{task_id}] Failed to run headed command: {e}\n{err_trace}\n")
+            log_fh.flush()
+            print(f"[{task_id}] Failed to run headed command: {e}")
+        finally:
+            if task_id in running_tasks:
+                del running_tasks[task_id]
+
+async def run_command_in_background(task_id: str, command: list, cwd: str, headed: bool = False):
+    target = _run_headed_process if headed else _run_sync_process
+    thread = threading.Thread(target=target, args=(task_id, command, cwd))
     thread.daemon = True
     thread.start()
 
@@ -130,6 +173,158 @@ async def trigger_download_api(req: BotRequest, background_tasks: BackgroundTask
     background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
     return {"status": "started", "message": f"Started SIRE API Download for {req.ruc} - {req.periodo}", "task_id": task_id}
 
+
+# ─────────────────────────────────────────────
+# DESCARGA MASIVA DE PRELIMINAR SIRE (BATCH)
+# ─────────────────────────────────────────────
+
+class BatchDownloadRequest(BaseModel):
+    periodo: str
+    rucs: list[str] | None = None  # Si None → usa todos los clientes con credenciales
+
+
+def _run_batch_download(task_id: str, rucs: list[str], periodo: str):
+    """
+    Worker secuencial: descarga el preliminar SIRE de cada RUC en orden,
+    uno por uno. Escribe logs acumulativos en un único archivo .log.
+    """
+    log_file = LOGS_DIR / f"{task_id}.log"
+    root_dir = Path(__file__).parent.parent
+    total = len(rucs)
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        f.write(f"{'='*60}\n")
+        f.write(f"  INICIO DESCARGA MASIVA DE PRELIMINAR SIRE\n")
+        f.write(f"  Periodo: {periodo}  |  Total clientes: {total}\n")
+        f.write(f"{'='*60}\n\n")
+        f.flush()
+
+        exitosos = 0
+        fallidos = 0
+
+        for i, ruc in enumerate(rucs, 1):
+            f.write(f"\n{'─'*50}\n")
+            f.write(f"[PROGRESO] {i}/{total} ── Cliente RUC: {ruc}\n")
+            f.write(f"{'─'*50}\n")
+            f.flush()
+
+            cmd = [
+                sys.executable,
+                "app/brain/sire_download_cli.py",
+                "--client", ruc,
+                "--period", periodo,
+            ]
+
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=str(root_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+
+                for line in process.stdout:
+                    f.write(line)
+                    f.flush()
+
+                process.wait()
+                rc = process.returncode
+
+                if rc == 0:
+                    exitosos += 1
+                    f.write(f"[OK] Cliente {ruc} finalizado correctamente.\n")
+                else:
+                    fallidos += 1
+                    f.write(f"[ERROR] Cliente {ruc} terminó con código {rc}.\n")
+
+            except Exception as e:
+                fallidos += 1
+                f.write(f"[EXCEPCION] Cliente {ruc}: {e}\n")
+
+            f.flush()
+            
+            # Descanso de 15 segundos entre clientes para evitar 429 Too Many Requests de SUNAT
+            if i < total:
+                f.write(f"Esperando 15 segundos para no saturar a SUNAT...\n")
+                f.flush()
+                time.sleep(15)
+
+        f.write(f"\n{'='*60}\n")
+        f.write(f"  FIN DESCARGA MASIVA\n")
+        f.write(f"  Exitosos: {exitosos}/{total}  |  Fallidos: {fallidos}/{total}\n")
+        f.write(f"{'='*60}\n")
+        f.flush()
+
+    if task_id in running_tasks:
+        del running_tasks[task_id]
+
+
+@app.post("/api/bot/batch-download-api")
+async def trigger_batch_download_api(req: BatchDownloadRequest, background_tasks: BackgroundTasks):
+    """
+    Descarga el preliminar SIRE para múltiples clientes en cola, uno por uno.
+    Si 'rucs' es None, descarga para todos los clientes que tienen usuario_sol configurado.
+    """
+    if not req.periodo:
+        raise HTTPException(status_code=400, detail="Periodo es requerido")
+
+    task_id = f"batch_api_{req.periodo}"
+    if task_id in running_tasks:
+        return {
+            "status": "already_running",
+            "message": "Ya hay una descarga masiva en curso para este periodo.",
+            "task_id": task_id,
+        }
+
+    # Determinar la lista de RUCs a procesar
+    rucs_to_process = req.rucs
+    if not rucs_to_process:
+        # Obtener todos los clientes con credenciales SOL y API configuradas
+        from app.brain.db.supabase_client import get_supabase
+        sb = get_supabase()
+        res = sb.table("clientes").select("ruc, usuario_sol, clave_sol, client_id_api, client_secret_api").execute()
+        clientes_data = res.data or []
+        rucs_to_process = [
+            c["ruc"]
+            for c in clientes_data
+            if c.get("usuario_sol") and c.get("clave_sol") and c.get("client_id_api") and c.get("client_secret_api")
+        ]
+
+    if not rucs_to_process:
+        raise HTTPException(
+            status_code=400,
+            detail="No hay clientes con credenciales SOL configuradas para procesar.",
+        )
+
+    running_tasks[task_id] = True
+    background_tasks.add_task(_run_batch_download, task_id, rucs_to_process, req.periodo)
+
+    return {
+        "status": "started",
+        "message": f"Descarga masiva iniciada: {len(rucs_to_process)} clientes para el periodo {req.periodo}.",
+        "task_id": task_id,
+        "total_clientes": len(rucs_to_process),
+    }
+
+
+@app.get("/api/clientes/con-credenciales")
+def get_clientes_con_credenciales():
+    """Devuelve la lista de clientes que tienen usuario_sol, clave_sol y credenciales API configurados."""
+    from app.brain.db.supabase_client import get_supabase
+    sb = get_supabase()
+    res = sb.table("clientes").select("id, ruc, razon_social, usuario_sol, client_id_api").execute()
+    clientes_data = res.data or []
+    filtrados = [
+        {"id": c["id"], "ruc": c["ruc"], "razon_social": c["razon_social"]}
+        for c in clientes_data
+        if c.get("usuario_sol") and c.get("client_id_api")
+    ]
+    return {"clientes": filtrados, "total": len(filtrados)}
+
 @app.post("/api/bot/automation-login")
 async def trigger_automation_login(req: BotRequest, background_tasks: BackgroundTasks):
     if not req.ruc:
@@ -139,11 +334,12 @@ async def trigger_automation_login(req: BotRequest, background_tasks: Background
     if task_id in running_tasks:
         return {"status": "already_running", "message": "Login task is already running.", "task_id": task_id}
         
-    cmd = [sys.executable, "app/brain/automation_scraper.py", "--ruc", req.ruc]
+    cmd = [sys.executable, "-u", "app/brain/automation_scraper.py", "--ruc", req.ruc]
     root_dir = Path(__file__).parent.parent
     
     running_tasks[task_id] = True
-    background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir))
+    # Use headed=True to avoid EPIPE crash with Playwright's headed browser
+    background_tasks.add_task(run_command_in_background, task_id, cmd, str(root_dir), True)
     return {"status": "started", "message": f"Started Authentication bot for {req.ruc}", "task_id": task_id}
 
 @app.post("/api/bot/download-fisicos")
@@ -207,6 +403,45 @@ def get_local_files():
         pass
         
     return {"files": list(set(files))}
+
+@app.post("/api/bot/upload-manual")
+async def upload_manual_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    ruc_tercero: str = Form(...),
+    tipo_cp: str = Form(...),
+    serie: str = Form(...),
+    numero: str = Form(...),
+    cliente_ruc: str = Form(...)
+):
+    import shutil
+    try:
+        root_dir = Path(__file__).parent.parent
+        downloads_dir = root_dir / "downloads" / "manual_uploads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in ['.xml', '.zip', '.pdf']:
+            raise HTTPException(status_code=400, detail="El archivo debe ser .xml, .zip o .pdf")
+            
+        ruc_terc = ruc_tercero.strip()
+        if not ruc_terc or ruc_terc == '-':
+            ruc_terc = cliente_ruc
+            
+        filename = f"{ruc_terc}-{tipo_cp}-{serie}-{numero}{ext}"
+        filepath = downloads_dir / filename
+        
+        with open(filepath, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        # Ejecutar sync_files para actualizar la base de datos
+        cmd = [sys.executable, "app/brain/db/sync_files.py"]
+        background_tasks.add_task(run_command_in_background, f"sync_manual_{time.time()}", cmd, str(root_dir))
+        
+        return {"status": "ok", "message": "Archivo subido y sincronización iniciada", "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/bot/enrich-xml")
 async def trigger_enrich_xml(req: BotRequest, background_tasks: BackgroundTasks):
@@ -1324,3 +1559,125 @@ async def upload_comprobante_file(
         "saved_to": str(dest_path),
         "size_bytes": len(contents),
     }
+
+
+# ─────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────
+# EMISIÓN DE FACTURAS - INTEGRACIÓN REAL APISUNAT
+# ─────────────────────────────────────────────
+import httpx
+
+APISUNAT_SANDBOX = "https://sandbox.apisunat.pe"
+APISUNAT_PROD    = "https://app.apisunat.pe"
+
+class FacturacionEmitirRequest(BaseModel):
+    emisor_ruc: str
+    receptor: dict
+    comprobante: dict
+    items: list
+    totales: dict
+    token: str         # Bearer token del cliente - obtenido en app.apisunat.pe
+    sandbox: bool = True  # True = pruebas, False = producción
+
+@app.post("/api/facturacion/emitir")
+def emitir_comprobante(req: FacturacionEmitirRequest):
+    if not req.token:
+        raise HTTPException(status_code=400, detail="Se requiere el token de APISUNAT de esta empresa.")
+
+    # Construir el payload que acepta APISUNAT
+    # Mapear tipo de comprobante
+    tipo_doc_map = {"01": "factura", "03": "boleta"}
+    tipo_doc = tipo_doc_map.get(req.comprobante.get("tipo", "01"), "factura")
+
+    # Construir items en formato APISUNAT
+    apisunat_items = []
+    for item in req.items:
+        cantidad = float(item.get("cantidad", 1))
+        precio_unitario = float(item.get("precio_unitario", 0))
+        # valor_unitario = precio sin IGV
+        valor_unitario = precio_unitario / 1.18
+        apisunat_items.append({
+            "unidad_de_medida": "NIU",
+            "descripcion": item.get("descripcion", "Producto"),
+            "cantidad": str(cantidad),
+            "valor_unitario": f"{valor_unitario:.6f}",
+            "porcentaje_igv": "18",
+            "codigo_tipo_afectacion_igv": "10",
+            "nombre_tributo": "IGV"
+        })
+
+    payload = {
+        "documento": tipo_doc,
+        "serie": req.comprobante.get("serie", "F001"),
+        "numero": int(req.comprobante.get("correlativo", 1) or 1),
+        "fecha_de_emision": req.comprobante.get("fecha"),
+        "moneda": req.comprobante.get("moneda", "PEN"),
+        "tipo_operacion": "0101",
+        "cliente_tipo_de_documento": "6" if len(req.receptor.get("ruc","")) == 11 else "1",
+        "cliente_numero_de_documento": req.receptor.get("ruc", ""),
+        "cliente_denominacion": req.receptor.get("razon_social", ""),
+        "cliente_direccion": req.receptor.get("direccion", ""),
+        "items": apisunat_items,
+        "total": f"{req.totales.get('total', 0):.2f}"
+    }
+
+    base_url = APISUNAT_SANDBOX if req.sandbox else APISUNAT_PROD
+    url = f"{base_url}/api/v3/documents"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {req.token}"
+    }
+
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=30)
+        data = response.json()
+
+        if response.status_code == 200 and data.get("success"):
+            payload_resp = data.get("payload", {})
+            return {
+                "status": "success",
+                "estado": payload_resp.get("estado"),
+                "message": data.get("message"),
+                "xml_url": payload_resp.get("xml"),
+                "pdf_url": payload_resp.get("pdf"),
+                "cdr_url": payload_resp.get("cdr"),
+                "hash": payload_resp.get("hash"),
+            }
+        else:
+            # Devolver el error tal como viene de APISUNAT
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=data.get("message", "Error al emitir en APISUNAT")
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Tiempo de espera agotado conectando con APISUNAT.")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Error de conexión con APISUNAT: {str(e)}")
+
+@app.post("/api/facturacion/estado")
+def consultar_estado(body: dict):
+    """Consulta el estado de un comprobante ya emitido en APISUNAT"""
+    token = body.get("token", "")
+    sandbox = body.get("sandbox", True)
+    if not token:
+        raise HTTPException(status_code=400, detail="Token requerido")
+
+    base_url = APISUNAT_SANDBOX if sandbox else APISUNAT_PROD
+    url = f"{base_url}/api/v3/status"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}"
+    }
+    payload = {
+        "serie": body.get("serie"),
+        "numero": body.get("numero"),
+        "tipo": body.get("tipo", "01"),
+        "ruc_emisor": body.get("ruc_emisor")
+    }
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=20)
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
