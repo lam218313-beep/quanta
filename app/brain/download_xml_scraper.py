@@ -110,10 +110,14 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
             print(f"⚠️ Timeout esperando MenuInternet.htm: {e}")
             print(f"   URL actual: {page.url}")
             print(f"   Título: {await page.title()}")
-            # Intentar ver si hay un modal de error en el login (ej. clave incorrecta)
+            try:
+                body_text = await page.evaluate("document.body.innerText")
+                print(f"   Texto en pantalla: {body_text[:1000]}")
+            except:
+                pass
             error_msg = await page.evaluate("() => { const el = document.querySelector('.error-message, .alert-danger, #msgError'); return el ? el.innerText : ''; }")
             if error_msg:
-                print(f"   Mensaje de error en pantalla: {error_msg}")
+                print(f"   Mensaje de error: {error_msg}")
         
         cookies = await context.cookies()
         if len(cookies) > 5:
