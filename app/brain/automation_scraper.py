@@ -54,47 +54,23 @@ async def run(ruc: str):
         else:
             print("👤 No credentials found. Please Log In manually in the browser window.")
 
-        print("⏳ Waiting for user to log in...")
-        print("👉 IMPORTANT: Once inside the menu, please click on:")
-        print("   'Empresas' -> 'Comprobantes de Pago' -> 'Consulta de Comprobantes de Pago' -> 'Nueva Consulta de comprobantes de pago'")
-        print("   (This step is required to generate the specific cookies we need for XML downloads)")
+        print("⏳ Checking login status...")
         
-        # Smart Session Detection: Poll for cookies
-        max_retries = 120 # 2 minutes (polling every 1s)
-        found_session = False
+        # In headless mode (Railway/Production), we cannot wait for a user to click.
+        # We just wait for the login to redirect to the Menu URL, and save the base cookies.
+        try:
+            await page.wait_for_url("**/MenuInternet.htm*", timeout=15000)
+            print("✅ Login successful! Redirected to menu.")
+            found_session = True
+        except Exception as e:
+            print(f"⚠️ Did not reach menu URL in time, or CAPTCHA required: {e}")
+            found_session = False
         
         try:
-            for i in range(max_retries):
-                cookies = await context.cookies()
-                
-                # Check for known authenticated session cookies
-                itcons_cookie = next((c for c in cookies if "ITCONS" in c['name'] or "cFallo" in c['name']), None)
-                ts_cookie = next((c for c in cookies if c['name'].startswith("TS")), None)
-                
-                # Strict Success: Found the Legacy Cookie
-                if itcons_cookie:
-                    print(f"✅ Login detected! Found LEGACY cookie: {itcons_cookie['name']}")
-                    found_session = True
-                    break
-                
-                # Fallback Success: Found enough TS cookies (user might be in menu but not legacy app)
-                # We will accept this but warn the user
-                ts_cookies = [c for c in cookies if c['name'].startswith("TS")]
-                if len(ts_cookies) >= 2 and i > 3:
-                     print(f"⚠️ Ambiguous Login: Found {len(ts_cookies)} TS cookies but no ITCONS.")
-                     print("   Proceeding... (Hope this works!)")
-                     found_session = True
-                     break
-                
-                if i % 5 == 0:
-                    print(f"   ... waiting. Please open 'Consulta Validez' inside the menu. (Attempt {i}/{max_retries})")
-                
-                await asyncio.sleep(1)
-            
             # Extract Cookies Final
             cookies = await context.cookies()
             
-            if found_session:
+            if found_session or len(cookies) > 5:
                 print(f"🎉 Success! Extracted {len(cookies)} cookies.")
                 
                 # Save cookies to a file based on RUC
