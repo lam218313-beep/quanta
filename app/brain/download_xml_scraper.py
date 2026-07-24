@@ -97,11 +97,18 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
         usuario = resp.data[0].get("usuario_sol")
         clave = resp.data[0].get("clave_sol")
         
-        await page.fill("#txtRuc", ruc)
-        await page.fill("#txtUsuario", usuario)
-        await page.fill("#txtContrasena", clave)
-        await page.click("#btnAceptar")
-        print("   Botón Aceptar presionado. Esperando redirección...")
+        # Rellenar con pausas para asegurar que los eventos JS de SUNAT registren el input
+        await page.locator("#txtRuc").fill(ruc)
+        await asyncio.sleep(0.5)
+        await page.locator("#txtUsuario").fill(usuario)
+        await asyncio.sleep(0.5)
+        await page.locator("#txtContrasena").fill(clave)
+        await asyncio.sleep(0.5)
+        
+        # A veces el botón btnAceptar está cubierto o desactivado temporalmente. 
+        # Usamos evaluate para forzar el click a nivel de DOM.
+        await page.evaluate("document.getElementById('btnAceptar').click()")
+        print("   Botón Aceptar presionado (vía JS). Esperando redirección...")
         
         try:
             await page.wait_for_url("**/MenuInternet.htm*", timeout=25000)
@@ -113,9 +120,12 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
             try:
                 body_text = await page.evaluate("document.body.innerText")
                 print(f"   Texto en pantalla: {body_text[:1000]}")
+                # Imprimir valores reales de los inputs para ver si se llenaron
+                inputs = await page.evaluate("() => { return 'RUC:' + document.getElementById('txtRuc').value + ' USR:' + document.getElementById('txtUsuario').value; }")
+                print(f"   Campos: {inputs}")
             except:
                 pass
-            error_msg = await page.evaluate("() => { const el = document.querySelector('.error-message, .alert-danger, #msgError'); return el ? el.innerText : ''; }")
+            error_msg = await page.evaluate("() => { const el = document.querySelector('.error-message, .alert-danger, #msgError, .modal-body'); return el ? el.innerText : ''; }")
             if error_msg:
                 print(f"   Mensaje de error: {error_msg}")
         
