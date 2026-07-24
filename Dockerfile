@@ -14,5 +14,5 @@ COPY . .
 # Exponer el puerto que usará FastAPI
 EXPOSE 8000
 
-# Comando para iniciar el servidor
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando para iniciar el servidor usando el puerto dinámico de Railway
+CMD uvicorn app.api:app --host 0.0.0.0 --port ${PORT:-8000}
