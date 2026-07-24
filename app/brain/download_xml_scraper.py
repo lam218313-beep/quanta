@@ -103,8 +103,17 @@ async def _auto_login_with_browser(browser, ruc: str) -> bool:
         await page.click("#btnAceptar")
         print("   Botón Aceptar presionado. Esperando redirección...")
         
-        await page.wait_for_url("**/MenuInternet.htm*", timeout=15000)
-        print("✅ Auto-Login exitoso! Sesión generada.")
+        try:
+            await page.wait_for_url("**/MenuInternet.htm*", timeout=25000)
+            print("✅ Auto-Login exitoso! Sesión generada.")
+        except Exception as e:
+            print(f"⚠️ Timeout esperando MenuInternet.htm: {e}")
+            print(f"   URL actual: {page.url}")
+            print(f"   Título: {await page.title()}")
+            # Intentar ver si hay un modal de error en el login (ej. clave incorrecta)
+            error_msg = await page.evaluate("() => { const el = document.querySelector('.error-message, .alert-danger, #msgError'); return el ? el.innerText : ''; }")
+            if error_msg:
+                print(f"   Mensaje de error en pantalla: {error_msg}")
         
         cookies = await context.cookies()
         if len(cookies) > 5:
