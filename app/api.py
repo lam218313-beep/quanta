@@ -354,7 +354,7 @@ async def trigger_download_fisicos(req: BotRequest, background_tasks: Background
     if task_id in running_tasks:
         return {"status": "already_running", "message": "XML Scraper is already running.", "task_id": task_id}
         
-    cmd = [sys.executable, "app/brain/db/sire_bot_orchestrator.py", "--limit", "200", "--ruc", req.ruc]
+    cmd = [sys.executable, "app/brain/db/sire_bot_orchestrator.py", "--headless", "--limit", "200", "--ruc", req.ruc]
     if req.periodo:
         cmd += ["--periodo", req.periodo]
     if req.tipo_libro:
