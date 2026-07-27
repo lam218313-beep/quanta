@@ -667,19 +667,23 @@ function App() {
                       
                       {activeStep === 1 && (
                         <>
-                          <td style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className={`badge ${row.estado_xml === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_xml || '-'}</span>
-                            <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa' }} title="Subir XML manual">
-                              <Upload size={14} />
-                              <input type="file" accept=".xml,.zip" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'xml')} />
-                            </label>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className={`badge ${row.estado_xml === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_xml || '-'}</span>
+                              <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa', margin: 0 }} title="Subir XML manual">
+                                <Upload size={14} />
+                                <input type="file" accept=".xml,.zip" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'xml')} />
+                              </label>
+                            </div>
                           </td>
-                          <td style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className={`badge ${row.estado_pdf === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_pdf || '-'}</span>
-                            <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa' }} title="Subir PDF manual">
-                              <Upload size={14} />
-                              <input type="file" accept=".pdf" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'pdf')} />
-                            </label>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className={`badge ${row.estado_pdf === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_pdf || '-'}</span>
+                              <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa', margin: 0 }} title="Subir PDF manual">
+                                <Upload size={14} />
+                                <input type="file" accept=".pdf" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'pdf')} />
+                              </label>
+                            </div>
                           </td>
                         </>
                       )}
