@@ -267,6 +267,54 @@ function App() {
     addToast('Iniciando descarga de comprobantes físicos...', 'info')
     handleBotAction('download-fisicos')
   }
+  const handleResetPendientes = async () => {
+    const cliente = clientes.find(c => c.id === selectedCliente)
+    if (!cliente || !selectedPeriodo) return
+
+    if (!window.confirm("¿Seguro que quieres pasar todos los comprobantes fallidos a PENDIENTE para que el bot los reintente?")) return;
+
+    addToast('Reiniciando estado de comprobantes...', 'info')
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/comprobantes/reset-pendientes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ruc: cliente.ruc, periodo: selectedPeriodo })
+      })
+      const result = await response.json()
+      if (response.ok) {
+        addToast(`✅ ${result.mensaje}`, 'success')
+        fetchData() // Refresh table
+      } else {
+        addToast(`❌ Error: ${result.detail || 'Error en servidor'}`, 'danger')
+      }
+    } catch (e) {
+      addToast(`Error de conexión`, 'danger')
+    }
+  }
+
+  const handleManualUpload = async (comprobanteId, file, fileType) => {
+    if (!file) return;
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('file_type', fileType)
+
+    addToast(`Subiendo ${fileType.toUpperCase()}...`, 'info')
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/comprobante/${comprobanteId}/upload`, {
+        method: 'POST',
+        body: formData
+      })
+      const result = await response.json()
+      if (response.ok) {
+        addToast(`✅ ${fileType.toUpperCase()} subido correctamente`, 'success')
+        fetchData() // Refresh table
+      } else {
+        addToast(`❌ Error: ${result.detail || 'Error al subir archivo'}`, 'danger')
+      }
+    } catch (e) {
+      addToast(`Error de conexión al subir archivo`, 'danger')
+    }
+  }
 
   const handleAddClient = async () => {
     if (!newClient.ruc || !newClient.razon_social) {
@@ -494,6 +542,9 @@ function App() {
                         <button disabled={!isReadyToProcess || !!activeTaskId} onClick={handleSyncSireFisicos} className="btn btn-primary">
                           <Database size={16} /> 2. Autenticar & Descargar Físicos
                         </button>
+                        <button disabled={!isReadyToProcess || !!activeTaskId} onClick={handleResetPendientes} className="btn btn-warning" style={{background: 'linear-gradient(135deg, #f59e0b, #d97706)'}}>
+                          <RefreshCcw size={16} /> Reintentar Fallidos
+                        </button>
                         <button disabled={!isReadyToProcess || !!activeTaskId} onClick={() => handleExportPdfs('COMPRAS')} className="btn btn-secondary">
                           <Download size={16} /> Consolidar PDFs Compras
                         </button>
@@ -616,8 +667,20 @@ function App() {
                       
                       {activeStep === 1 && (
                         <>
-                          <td><span className={`badge ${row.estado_xml === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_xml || '-'}</span></td>
-                          <td><span className={`badge ${row.estado_pdf === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_pdf || '-'}</span></td>
+                          <td style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className={`badge ${row.estado_xml === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_xml || '-'}</span>
+                            <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa' }} title="Subir XML manual">
+                              <Upload size={14} />
+                              <input type="file" accept=".xml,.zip" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'xml')} />
+                            </label>
+                          </td>
+                          <td style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className={`badge ${row.estado_pdf === 'DESCARGADO' ? 'badge-success' : 'badge-danger'}`}>{row.estado_pdf || '-'}</span>
+                            <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#a78bfa' }} title="Subir PDF manual">
+                              <Upload size={14} />
+                              <input type="file" accept=".pdf" style={{ display: 'none' }} onChange={(e) => handleManualUpload(row.id, e.target.files[0], 'pdf')} />
+                            </label>
+                          </td>
                         </>
                       )}
 
