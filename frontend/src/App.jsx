@@ -123,7 +123,7 @@ function App() {
       } else if (selectedPhase === 'descargados') {
         const { data: fisicos } = await supabase
           .from('sire_comprobantes_fisicos')
-          .select('*, sire_preliminar_compras(fecha_emision, total_cp), sire_preliminar_ventas(fecha_emision, mto_imp_venta)')
+          .select('*, sire_preliminar_compras(fecha_emision, total_cp), sire_preliminar_ventas(fecha_emision, total_cp)')
           .eq('cliente_id', selectedCliente)
           .eq('periodo', selectedPeriodo)
           
@@ -149,7 +149,7 @@ function App() {
             f.total_cp = f.sire_preliminar_compras.total_cp;
           } else if (f.sire_preliminar_ventas) {
             f.fecha_emision = f.sire_preliminar_ventas.fecha_emision;
-            f.total_cp = f.sire_preliminar_ventas.mto_imp_venta;
+            f.total_cp = f.sire_preliminar_ventas.total_cp;
           }
           
           return f
