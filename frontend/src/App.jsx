@@ -123,7 +123,7 @@ function App() {
       } else if (selectedPhase === 'descargados') {
         const { data: fisicos } = await supabase
           .from('sire_comprobantes_fisicos')
-          .select('*')
+          .select('*, sire_preliminar_compras(fecha_emision, total_cp), sire_preliminar_ventas(fecha_emision, mto_imp_venta)')
           .eq('cliente_id', selectedCliente)
           .eq('periodo', selectedPeriodo)
           
@@ -143,6 +143,15 @@ function App() {
           
           if (localFiles.includes(`${baseName}.xml`) || localFiles.includes(`${baseName}.zip`)) f.estado_xml = 'DESCARGADO'
           if (localFiles.includes(`${baseName}.pdf`)) f.estado_pdf = 'DESCARGADO'
+
+          if (f.sire_preliminar_compras) {
+            f.fecha_emision = f.sire_preliminar_compras.fecha_emision;
+            f.total_cp = f.sire_preliminar_compras.total_cp;
+          } else if (f.sire_preliminar_ventas) {
+            f.fecha_emision = f.sire_preliminar_ventas.fecha_emision;
+            f.total_cp = f.sire_preliminar_ventas.mto_imp_venta;
+          }
+          
           return f
         })
         setData(enrichedFisicos)
