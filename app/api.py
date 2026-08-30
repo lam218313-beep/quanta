@@ -285,6 +285,35 @@ async def trigger_batch_download_api(req: BatchDownloadRequest, background_tasks
     if not rucs_to_process:
         # Obtener todos los clientes con credenciales SOL y API configuradas
         from app.brain.db.supabase_client import get_supabase
+
+class MockResponse:
+    def __init__(self, data):
+        self.data = data
+
+def fetch_all_records(table, supabase_client, select="*", eq_filters=None, order_by=None):
+    if eq_filters is None:
+        eq_filters = {}
+    all_data = []
+    page = 0
+    page_size = 1000
+    while True:
+        query = supabase_client.table(table).select(select)
+        for k, v in eq_filters.items():
+            query = query.eq(k, v)
+        if order_by:
+            query = query.order(order_by)
+        
+        query = query.range(page * page_size, (page + 1) * page_size - 1)
+        res = query.execute()
+        
+        if not res.data:
+            break
+        all_data.extend(res.data)
+        if len(res.data) < page_size:
+            break
+        page += 1
+    return MockResponse(all_data)
+
         sb = get_supabase()
         res = sb.table("clientes").select("ruc, usuario_sol, clave_sol, client_id_api, client_secret_api").execute()
         clientes_data = res.data or []
@@ -522,7 +551,7 @@ def export_pdf_merged(req: ExportPdfRequest, background_tasks: BackgroundTasks):
     cliente_id = res_cli.data[0]["id"]
     
     # Obtener las rutas de los pdf y datos del comprobante de ese cliente, periodo y tipo
-    res_docs = supabase.table("sire_comprobantes_fisicos").select("id, serie, numero, ruta_pdf").eq("cliente_id", cliente_id).eq("periodo", req.periodo).eq("tipo_libro", req.tipo_libro).execute()
+    res_docs = fetch_all_records("sire_comprobantes_fisicos", supabase, "id, serie, numero, ruta_pdf", {"cliente_id": cliente_id, "periodo": req.periodo, "tipo_libro": req.tipo_libro})
     
     if not res_docs.data:
         raise HTTPException(status_code=404, detail="No hay comprobantes para exportar")
@@ -636,11 +665,11 @@ def export_sire_txt(req: ExportSireTxtRequest):
     cliente_id = res_cli.data[0]["id"]
 
     if req.tipo_libro == "COMPRAS":
-        res = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente_id).eq("periodo", req.periodo).order("fecha_emision").execute()
+        res = fetch_all_records("sire_preliminar_compras", supabase, "*", {"cliente_id": cliente_id, "periodo": req.periodo}, "fecha_emision")
         txt_content = build_custom_compras_txt(res.data, req.ruc, req.periodo)
         filename = f"Compras_{req.periodo}_M1.txt"
     else:
-        res = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente_id).eq("periodo", req.periodo).order("fecha_emision").execute()
+        res = fetch_all_records("sire_preliminar_ventas", supabase, "*", {"cliente_id": cliente_id, "periodo": req.periodo}, "fecha_emision")
         txt_content = build_custom_ventas_txt(res.data, req.ruc, req.periodo)
         filename = f"Ventas_{req.periodo}_M1.txt"
 
@@ -668,11 +697,11 @@ async def bot_upload_sire(req: ExportSireTxtRequest, background_tasks: Backgroun
 
     # 1. Generar TXT
     if req.tipo_libro == "COMPRAS":
-        res = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente["id"]).eq("periodo", req.periodo).order("fecha_emision").execute()
+        res = fetch_all_records("sire_preliminar_compras", supabase, "*", {"cliente_id": cliente["id"], "periodo": req.periodo}, "fecha_emision")
         txt_content = build_sire_compras_txt(res.data, req.ruc, req.periodo)
         filename_txt = f"LE{req.ruc}{req.periodo}000804000211112.txt"
     else:
-        res = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente["id"]).eq("periodo", req.periodo).order("fecha_emision").execute()
+        res = fetch_all_records("sire_preliminar_ventas", supabase, "*", {"cliente_id": cliente["id"], "periodo": req.periodo}, "fecha_emision")
         txt_content = build_sire_ventas_txt(res.data, req.ruc, req.periodo)
         filename_txt = f"LE{req.ruc}{req.periodo}001404000211112.txt"
 
@@ -755,19 +784,9 @@ def export_preliminar_excel(req: ExportPreliminarRequest):
         periodo_label = periodo_fmt
 
     # ── Obtener datos ───────────────────────────────────────────────────────
-    res_v = supabase.table("sire_preliminar_ventas") \
-        .select("*") \
-        .eq("cliente_id", cliente_id) \
-        .eq("periodo", req.periodo) \
-        .order("fecha_emision") \
-        .execute()
+    res_v = fetch_all_records("sire_preliminar_ventas", supabase, "*", {"cliente_id": cliente_id, "periodo": req.periodo}, "fecha_emision")
 
-    res_c = supabase.table("sire_preliminar_compras") \
-        .select("*") \
-        .eq("cliente_id", cliente_id) \
-        .eq("periodo", req.periodo) \
-        .order("fecha_emision") \
-        .execute()
+    res_c = fetch_all_records("sire_preliminar_compras", supabase, "*", {"cliente_id": cliente_id, "periodo": req.periodo}, "fecha_emision")
 
     ventas  = res_v.data or []
     compras = res_c.data or []
@@ -1090,13 +1109,13 @@ def export_excel(cliente_id: str, periodo: str):
     razon_social = res_cli.data[0]["razon_social"].replace(" ", "_")
     
     # Obtener compras
-    res_compras = supabase.table("sire_preliminar_compras").select("*").eq("cliente_id", cliente_id).eq("periodo", periodo).execute()
+    res_compras = fetch_all_records("sire_preliminar_compras", supabase, "*", {"cliente_id": cliente_id, "periodo": periodo})
     df_compras = pd.DataFrame(res_compras.data)
     if not df_compras.empty and "created_at" in df_compras.columns:
         df_compras = df_compras.drop(columns=["created_at", "cliente_id", "id", "error_log"], errors="ignore")
         
     # Obtener ventas
-    res_ventas = supabase.table("sire_preliminar_ventas").select("*").eq("cliente_id", cliente_id).eq("periodo", periodo).execute()
+    res_ventas = fetch_all_records("sire_preliminar_ventas", supabase, "*", {"cliente_id": cliente_id, "periodo": periodo})
     df_ventas = pd.DataFrame(res_ventas.data)
     if not df_ventas.empty and "created_at" in df_ventas.columns:
         df_ventas = df_ventas.drop(columns=["created_at", "cliente_id", "id", "error_log"], errors="ignore")
