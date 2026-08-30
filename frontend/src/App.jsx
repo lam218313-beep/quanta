@@ -99,18 +99,36 @@ function App() {
       const stepConfig = STEPS.find(s => s.id === activeStep)
       const selectedPhase = stepConfig.phaseFilter
 
+      const fetchAllRecords = async (table, selectQuery = '*', filters = {}) => {
+        let allData = [];
+        let page = 0;
+        const pageSize = 1000;
+        let fetchMore = true;
+
+        while (fetchMore) {
+          let query = supabase.from(table).select(selectQuery).range(page * pageSize, (page + 1) * pageSize - 1);
+          Object.keys(filters).forEach(key => {
+            query = query.eq(key, filters[key]);
+          });
+          const { data, error } = await query;
+          if (error) {
+            console.error('Error fetching data:', error);
+            break;
+          }
+          if (data && data.length > 0) {
+            allData = [...allData, ...data];
+            page++;
+          }
+          if (!data || data.length < pageSize) {
+            fetchMore = false;
+          }
+        }
+        return allData;
+      };
+
       if (selectedPhase === 'preliminar' || selectedPhase === 'enriquecimiento2') {
-        const { data: ventas } = await supabase
-          .from('sire_preliminar_ventas')
-          .select('*')
-          .eq('cliente_id', c_id)
-          .eq('periodo', selectedPeriodo)
-          
-        const { data: compras } = await supabase
-          .from('sire_preliminar_compras')
-          .select('*')
-          .eq('cliente_id', c_id)
-          .eq('periodo', selectedPeriodo)
+        const ventas = await fetchAllRecords('sire_preliminar_ventas', '*', { cliente_id: c_id, periodo: selectedPeriodo });
+        const compras = await fetchAllRecords('sire_preliminar_compras', '*', { cliente_id: c_id, periodo: selectedPeriodo });
 
         const allE = [...(ventas || []).map(v => ({...v, tipo: 'VENTA'})), ...(compras || []).map(c => ({...c, tipo: 'COMPRA'}))]
 
@@ -121,11 +139,7 @@ function App() {
         }
         
       } else if (selectedPhase === 'descargados') {
-        const { data: fisicos } = await supabase
-          .from('sire_comprobantes_fisicos')
-          .select('*, sire_preliminar_compras(fecha_emision, total_cp), sire_preliminar_ventas(fecha_emision, total_cp)')
-          .eq('cliente_id', selectedCliente)
-          .eq('periodo', selectedPeriodo)
+        const fisicos = await fetchAllRecords('sire_comprobantes_fisicos', '*, sire_preliminar_compras(fecha_emision, total_cp), sire_preliminar_ventas(fecha_emision, total_cp)', { cliente_id: selectedCliente, periodo: selectedPeriodo });
           
         let localFiles = []
         try {
