@@ -15,6 +15,34 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+class MockResponse:
+    def __init__(self, data):
+        self.data = data
+
+def fetch_all_records(table, supabase_client, select="*", eq_filters=None, order_by=None):
+    if eq_filters is None:
+        eq_filters = {}
+    all_data = []
+    page = 0
+    page_size = 1000
+    while True:
+        query = supabase_client.table(table).select(select)
+        for k, v in eq_filters.items():
+            query = query.eq(k, v)
+        if order_by:
+            query = query.order(order_by)
+        
+        query = query.range(page * page_size, (page + 1) * page_size - 1)
+        res = query.execute()
+        
+        if not res.data:
+            break
+        all_data.extend(res.data)
+        if len(res.data) < page_size:
+            break
+        page += 1
+    return MockResponse(all_data)
+
 app = FastAPI()
 
 # Allow CORS so React (port 5173) can talk to this API (port 8000)
@@ -285,35 +313,6 @@ async def trigger_batch_download_api(req: BatchDownloadRequest, background_tasks
     if not rucs_to_process:
         # Obtener todos los clientes con credenciales SOL y API configuradas
         from app.brain.db.supabase_client import get_supabase
-
-class MockResponse:
-    def __init__(self, data):
-        self.data = data
-
-def fetch_all_records(table, supabase_client, select="*", eq_filters=None, order_by=None):
-    if eq_filters is None:
-        eq_filters = {}
-    all_data = []
-    page = 0
-    page_size = 1000
-    while True:
-        query = supabase_client.table(table).select(select)
-        for k, v in eq_filters.items():
-            query = query.eq(k, v)
-        if order_by:
-            query = query.order(order_by)
-        
-        query = query.range(page * page_size, (page + 1) * page_size - 1)
-        res = query.execute()
-        
-        if not res.data:
-            break
-        all_data.extend(res.data)
-        if len(res.data) < page_size:
-            break
-        page += 1
-    return MockResponse(all_data)
-
         sb = get_supabase()
         res = sb.table("clientes").select("ruc, usuario_sol, clave_sol, client_id_api, client_secret_api").execute()
         clientes_data = res.data or []
